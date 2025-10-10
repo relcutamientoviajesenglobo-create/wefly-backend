@@ -58,6 +58,32 @@ app.use(express.json()); // Permite al servidor entender los datos JSON
 
 // --- 5. Crear el Endpoint de Pago ---
 app.post('/create-checkout-session', async (req, res) => {
+
+// ... dentro de app.post('/create-checkout-session', async (req, res) => {
+  try {
+    const bookingDetails = req.body;
+
+    // --- AÑADE ESTA VALIDACIÓN DE SEGURIDAD ---
+    if (!bookingDetails.total || typeof bookingDetails.total !== 'number' || bookingDetails.total <= 0) {
+        console.error('Intento de pago con total inválido:', bookingDetails.total);
+        return res.status(400).json({ error: 'El total de la reserva no es válido.' });
+    }
+    // --- FIN DE LA VALIDACIÓN ---
+
+    const session = await stripe.checkout.sessions.create({
+        // ... el resto de la configuración no cambia
+        // Asegúrate de que el total se redondee a un número entero de centavos
+        unit_amount: Math.round(bookingDetails.total * 100), 
+        // ...
+    });
+
+    res.json({ id: session.id });
+
+} catch (error) {
+    console.error("Error al crear la sesión de Stripe:", error);
+    res.status(500).json({ error: 'No se pudo crear la sesión de pago.' });
+}
+// ...
   try {
     const bookingDetails = req.body;
 
