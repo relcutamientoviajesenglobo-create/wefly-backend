@@ -80,18 +80,14 @@ app.post('/create-checkout-session', async (req, res) => {
 
     console.log('✅ Creando sesión de Stripe para:', bookingDetails);
 
-    // Crear la sesión de Stripe Checkout
+    // Crear la sesión de Stripe Checkout con un formato compatible
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [{
-        price_data: {
-          currency: 'mxn',
-          product_data: {
-            name: 'Vuelo en Globo en Teotihuacán',
-            description: `Reserva para ${bookingDetails.adults} adulto(s) y ${bookingDetails.children} niño(s).`,
-          },
-          unit_amount: Math.round(bookingDetails.total * 100),
-        },
+        name: 'Vuelo en Globo en Teotihuacán',
+        description: `Reserva para ${bookingDetails.adults} adulto(s) y ${bookingDetails.children} niño(s).`,
+        amount: Math.round(bookingDetails.total * 100), // Usamos 'amount' en lugar de 'price_data'
+        currency: 'mxn',
         quantity: 1,
       }],
       mode: 'payment',
