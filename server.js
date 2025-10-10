@@ -101,7 +101,7 @@ app.post('/create-checkout-session', async (req, res) => {
         nombreCliente: bookingDetails.contact.name,
         emailCliente: bookingDetails.contact.email,
         telefonoCliente: bookingDetails.contact.phone,
-        fechaVuelo: bookingDetails.date.split('T')[0],
+        fechaVuelo: bookingDetails.date ? bookingDetails.date.split('T')[0] : 'No especificada',
         adultos: bookingDetails.adults,
         ninos: bookingDetails.children,
         adicionales: JSON.stringify(bookingDetails.addons.map(a => a.name)),
@@ -120,66 +120,7 @@ app.post('/create-checkout-session', async (req, res) => {
     });
   }
 });
-  
-      console.log('✅ Sesión creada exitosamente:', session.id);
-      res.json({ id: session.id });
-  
-    } catch (error) {
-      console.error("❌ Error al crear la sesión de Stripe:", error.message);
-      res.status(500).json({
-        error: 'No se pudo crear la sesión de pago.',
-        details: error.message
-      });
-    }
-  });
 
-  try {
-    const bookingDetails = req.body;
-
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      mode: 'payment',
-    
-      // --- INICIO DE LÍNEAS NUEVAS ---
-      // Hacemos que la dirección de facturación (que incluye el nombre) sea obligatoria.
-      billing_address_collection: 'required', 
-      // Habilitamos la recolección del número de teléfono.
-      phone_number_collection: { enabled: true }, 
-      // Pasamos el email para que aparezca pre-llenado en el formulario de Stripe.
-      customer_email: bookingDetails.contact.email, 
-      // --- FIN DE LÍNEAS NUEVAS ---
-    
-      line_items: [{
-        price_data: {
-          currency: 'mxn',
-          product_data: {
-            name: 'Vuelo en Globo We Fly',
-            description: `Reserva para ${bookingDetails.adults} adulto(s) y ${bookingDetails.children} niño(s).`
-          },
-          unit_amount: Math.round(bookingDetails.total * 100),
-        },
-        quantity: 1,
-      }],
-      metadata: {
-        nombreCliente: bookingDetails.contact.name,
-        emailCliente: bookingDetails.contact.email,
-        telefonoCliente: bookingDetails.contact.phone,
-        fechaVuelo: bookingDetails.date.split('T')[0],
-        adultos: bookingDetails.adults,
-        ninos: bookingDetails.children,
-        adicionales: JSON.stringify(bookingDetails.addons.map(a => a.name)),
-      },
-      success_url: `https://wefly.com.mx/gracias-por-tu-compra`,
-      cancel_url: `https://wefly.com.mx/pago-cancelado`,
-    });
-
-    res.json({ id: session.id });
-
-  } catch (error) {
-    console.error("Error al crear la sesión de Stripe:", error);
-    res.status(500).json({ error: 'No se pudo crear la sesión de pago.' });
-  }
-});
 
 // --- 6. Iniciar el servidor ---
 // Render provee la variable PORT automáticamente.
