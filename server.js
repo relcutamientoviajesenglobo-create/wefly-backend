@@ -74,33 +74,46 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 app.post('/create-checkout-session', async (req, res) => {
   try {
     const booking = req.body || {};
+    
+    console.log('📥 Datos recibidos del frontend:', JSON.stringify(booking, null, 2));
+
+    // Extraer y limpiar datos
     const contact = booking.contact || {};
     const addons = Array.isArray(booking.addons) ? booking.addons : [];
-
-    console.log('📋 Datos recibidos:', JSON.stringify(booking, null, 2));
+    
+    // Convertir a números (por si vienen como strings)
+    const total = parseFloat(booking.total);
+    const adults = parseInt(booking.adults || 0);
+    const children = parseInt(booking.children || 0);
+    const pax = adults + children;
 
     // Validaciones
-    if (typeof booking.total !== 'number' || booking.total <= 0) {
+    if (isNaN(total) || total <= 0) {
+      console.error('❌ Total inválido:', booking.total);
       return res.status(400).json({ error: 'El total de la reserva no es válido.' });
     }
 
-    const adults = Number(booking.adults || 0);
-    const children = Number(booking.children || 0);
-    const pax = adults + children;
-    
     if (pax <= 0) {
+      console.error('❌ Pasajeros inválidos');
       return res.status(400).json({ error: 'Debes seleccionar al menos un pasajero.' });
     }
 
     if (contact.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact.email)) {
+      console.error('❌ Email inválido:', contact.email);
       return res.status(400).json({ error: 'Email de contacto inválido.' });
     }
 
     const FRONTEND = process.env.FRONTEND_URL || 'https://wefly.com.mx';
     const flightDate = booking.date ? String(booking.date).split('T')[0] : 'No especificada';
 
-    console.log('💳 Creando sesión de Stripe...');
+    console.log('💳 Creando sesión de Stripe con:', {
+      total,
+      adults,
+      children,
+      email: contact.email
+    });
 
+    // Crear sesión de Stripe
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       payment_method_types: ['card'],
@@ -114,9 +127,9 @@ app.post('/create-checkout-session', async (req, res) => {
             currency: 'mxn',
             product_data: {
               name: 'Vuelo en Globo en Teotihuacán',
-              description: `Reserva para ${adults} adulto(s) y ${children} niño(s).`,
+              description: `Reserva para ${adults} adulto(s) y ${children} niño(s). Fecha: ${flightDate}`,
             },
-            unit_amount: Math.round(booking.total * 100),
+            unit_amount: Math.round(total * 100), // Convertir pesos a centavos
           },
           quantity: 1,
         },
@@ -133,47 +146,23 @@ app.post('/create-checkout-session', async (req, res) => {
         adultos: String(adults),
         ninos: String(children),
         adicionales: JSON.stringify(addons.map(a => a?.name).filter(Boolean)),
-        total: String(booking.total),
+        totalPesos: String(total),
       },
     });
 
-    console.log('✅ Sesión creada:', session.id);
-    return res.json({ id: session.id });
+    console.log('✅ Sesión creada exitosamente:', session.id);
+    console.log('🔗 URL de checkout:', session.url);
+
+    return res.json({ 
+      id: session.id,
+      url: session.url // También enviar la URL por si acaso
+    });
 
   } catch (err) {
-    console.error('❌ Error Stripe Checkout:', err.message);
+    console.error('❌ Error completo:', err);
     return res.status(500).json({
       error: 'No se pudo crear la sesión de pago.',
       details: err?.message || 'Error desconocido',
     });
   }
-});
-
-// ---------- ENDPOINT DE VERIFICACIÓN DE PAGO ----------
-app.get('/payment-status/:sessionId', async (req, res) => {
-  try {
-    const session = await stripe.checkout.sessions.retrieve(req.params.sessionId);
-    res.json({
-      status: session.payment_status,
-      customerEmail: session.customer_details?.email,
-      amountTotal: session.amount_total / 100
-    });
-  } catch (error) {
-    console.error('❌ Error al verificar pago:', error);
-    res.status(500).json({ error: 'No se pudo verificar el pago' });
-  }
-});
-
-// ---------- MANEJO DE ERRORES ----------
-app.use((err, req, res, next) => {
-  console.error('❌ Error del servidor:', err.message);
-  res.status(500).json({ error: err.message });
-});
-
-// ---------- INICIAR SERVIDOR ----------
-const PORT = process.env.PORT || 4242;
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor escuchando en puerto ${PORT}`);
-  console.log('🌍 Orígenes permitidos:', allowedOrigins);
-  console.log('🔑 Stripe configurado:', process.env.STRIPE_SECRET_KEY ? '✅' : '❌');
 });
