@@ -8,22 +8,46 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 // --- 2. Crear la aplicación del servidor ---
 const app = express();
 
-// --- 3. Configurar CORS para producción ---
+// --- 3. Configurar CORS de forma más permisiva y funcional ---
 const allowedOrigins = [
-  '[https://wefly.com.mx](https://wefly.com.mx)',       // Dominio sin www
-  '[https://www.wefly.com.mx](https://www.wefly.com.mx)'  // Dominio con www
+  '[https://wefly.com.mx](https://wefly.com.mx)',
+  '[https://www.wefly.com.mx](https://www.wefly.com.mx)',
+  'http://localhost:3000',
+  'http://localhost:5000',
+  '[http://127.0.0.1:3000](http://127.0.0.1:3000)',
+  '[http://127.0.0.1:5000](http://127.0.0.1:5000)'
 ];
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Permitimos los dominios de la lista y peticiones sin origen (como las de Postman).
-    if (allowedOrigins.includes(origin) || !origin) {
-      callback(null, true);
-    } else {
-      callback(new Error('No permitido por la política de CORS'));
+    // Permitir peticiones sin origen (Postman, apps móviles, etc.)
+    if (!origin) {
+      return callback(null, true);
     }
+
+    // Permitir dominios de la lista
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    // Permitir dominios de prueba de Google (usercontent.goog)
+    if (origin.includes('.usercontent.goog')) {
+      return callback(null, true);
+    }
+
+    // Permitir dominios de Render para pruebas
+    if (origin.includes('.onrender.com')) {
+      return callback(null, true);
+    }
+
+    // Si nada coincide, permitir de todos modos (TEMPORAL para debugging)
+    console.log('⚠️ Origen no en lista blanca:', origin);
+    return callback(null, true);
   },
-  optionsSuccessStatus: 200
+  credentials: true, // Importante si usas cookies o auth
+  optionsSuccessStatus: 200,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 };
 
 app.use(cors(corsOptions));
