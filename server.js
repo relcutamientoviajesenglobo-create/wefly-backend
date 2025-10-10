@@ -11,7 +11,7 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 
-// --- Configuración de CORS (Versión Final y Simplificada) ---
+// --- Configuración de CORS (Versión Final y Corregida) ---
 const allowedOrigins = [
   '[https://wefly.com.mx](https://wefly.com.mx)',
   '[https://www.wefly.com.mx](https://www.wefly.com.mx)'
