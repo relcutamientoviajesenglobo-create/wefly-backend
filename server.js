@@ -10,12 +10,13 @@ const app = express();
 
 // --- 3. Configurar CORS para producción y pruebas ---
 const allowedOrigins = [
-  '[https://wefly.com.mx](https://wefly.com.mx)' // Tu dominio de producción
+  '[https://wefly.com.mx](https://wefly.com.mx)',       // Dominio sin www
+  '[https://www.wefly.com.mx](https://www.wefly.com.mx)'  // Dominio con www
 ];
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Permitimos el dominio de producción, dominios de vista previa y peticiones sin origen (como las de Postman).
+    // Permitimos los dominios de la lista, dominios de vista previa y peticiones sin origen.
     if (allowedOrigins.includes(origin) || (origin && origin.endsWith('.usercontent.goog')) || !origin) {
       callback(null, true);
     } else {
@@ -26,7 +27,6 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-
 
 // --- 4. Configurar Middleware Adicional ---
 app.use(express.json()); // Permite al servidor entender los datos JSON
