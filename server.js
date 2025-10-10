@@ -13,8 +13,8 @@ const app = express();
  * También puedes usar la variable ALLOWED_ORIGINS separada por comas en Render.
  */
 const DEFAULT_ALLOWED_ORIGINS = [
-  'https://wefly.com.mx',
-  'https://www.wefly.com.mx',
+  '[https://wefly.com.mx](https://wefly.com.mx)',
+  '[https://www.wefly.com.mx](https://www.wefly.com.mx)',
   'http://localhost:3000'
 ];
 
@@ -74,7 +74,7 @@ app.post('/create-checkout-session', async (req, res) => {
       return res.status(400).json({ error: 'Email de contacto inválido.' });
     }
 
-    const FRONTEND = process.env.FRONTEND_URL || 'https://wefly.com.mx';
+    const FRONTEND = process.env.FRONTEND_URL || '[https://wefly.com.mx](https://wefly.com.mx)';
     const flightDate = booking.date ? String(booking.date).split('T')[0] : 'No especificada';
 
     const session = await stripe.checkout.sessions.create({
