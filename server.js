@@ -8,7 +8,7 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 // --- 2. Crear la aplicación del servidor ---
 const app = express();
 
-// --- 3. Configurar CORS para producción y pruebas ---
+// --- 3. Configurar CORS para producción ---
 const allowedOrigins = [
   '[https://wefly.com.mx](https://wefly.com.mx)',       // Dominio sin www
   '[https://www.wefly.com.mx](https://www.wefly.com.mx)'  // Dominio con www
@@ -16,8 +16,8 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Permitimos los dominios de la lista, dominios de vista previa y peticiones sin origen.
-    if (allowedOrigins.includes(origin) || (origin && origin.endsWith('.usercontent.goog')) || !origin) {
+    // Permitimos los dominios de la lista y peticiones sin origen (como las de Postman).
+    if (allowedOrigins.includes(origin) || !origin) {
       callback(null, true);
     } else {
       callback(new Error('No permitido por la política de CORS'));
@@ -27,7 +27,6 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-
 
 // --- 4. Configurar Middleware Adicional ---
 app.use(express.json()); // Permite al servidor entender los datos JSON
