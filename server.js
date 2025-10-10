@@ -15,7 +15,7 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Permitimos el dominio de producción y cualquier dominio de prueba de Google (.usercontent.goog).
+    // Permitimos el dominio de producción, dominios de vista previa y peticiones sin origen (como las de Postman).
     if (allowedOrigins.includes(origin) || (origin && origin.endsWith('.usercontent.goog')) || !origin) {
       callback(null, true);
     } else {
