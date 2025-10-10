@@ -6,12 +6,7 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 
-// ---------- CORS CORREGIDO ----------
-/**
- * Define tus orígenes permitidos sin Markdown.
- * Agrega los que uses para pruebas (por ejemplo, subdominios de Render o tu preview).
- * También puedes usar la variable ALLOWED_ORIGINS separada por comas en Render.
- */
+// ---------- CORS CORREGIDO Y SIMPLIFICADO ----------
 const DEFAULT_ALLOWED_ORIGINS = [
   '[https://wefly.com.mx](https://wefly.com.mx)',
   '[https://www.wefly.com.mx](https://www.wefly.com.mx)',
@@ -23,24 +18,19 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS
   : DEFAULT_ALLOWED_ORIGINS
 );
 
-/**
- * Permitimos peticiones solo si el Origin está en la lista.
- * OJO: requests sin Origin (p. ej., curl/cron) se aceptan.
- */
 const corsOptions = {
   origin(origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error(`Origen no permitido por CORS: ${origin}`), false);
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`Origen no permitido por CORS: ${origin}`), false);
+    }
   },
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: false,
-  optionsSuccessStatus: 204,
 };
 
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // preflight
 app.use(express.json());
 
 // ---------- RUTAS BÁSICAS ----------
@@ -69,7 +59,6 @@ app.post('/create-checkout-session', async (req, res) => {
       return res.status(400).json({ error: 'Debes seleccionar al menos un pasajero.' });
     }
 
-    // Email opcional pero recomendado: valida formato simple si llega
     if (contact.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact.email)) {
       return res.status(400).json({ error: 'Email de contacto inválido.' });
     }
@@ -92,7 +81,7 @@ app.post('/create-checkout-session', async (req, res) => {
               name: 'Vuelo en Globo en Teotihuacán',
               description: `Reserva para ${adults} adulto(s) y ${children} niño(s).`,
             },
-            unit_amount: Math.round(booking.total * 100), // centavos
+            unit_amount: Math.round(booking.total * 100),
           },
           quantity: 1,
         },
