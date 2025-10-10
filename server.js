@@ -6,11 +6,20 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 
-// ---------- CORS CORREGIDO Y SIMPLIFICADO ----------
+// ---------- MIDDLEWARE DE LOGGING ----------
+app.use((req, res, next) => {
+  console.log('📥 Petición recibida:', req.method, req.path);
+  console.log('🌍 Origen:', req.headers.origin || 'sin origen');
+  next();
+});
+
+// ---------- CORS CORREGIDO ----------
 const DEFAULT_ALLOWED_ORIGINS = [
-  '[https://wefly.com.mx](https://wefly.com.mx)',
-  '[https://www.wefly.com.mx](https://www.wefly.com.mx)',
-  'http://localhost:3000'
+  'https://wefly.com.mx',                    // ✅ SIN corchetes ni paréntesis
+  'https://www.wefly.com.mx',                // ✅ SIN corchetes ni paréntesis
+  'http://localhost:3000',
+  'http://localhost:5000',
+  'http://127.0.0.1:3000'
 ];
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS
@@ -20,14 +29,35 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS
 
 const corsOptions = {
   origin(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error(`Origen no permitido por CORS: ${origin}`), false);
+    // Permitir peticiones sin origen (Postman, apps móviles)
+    if (!origin) {
+      return callback(null, true);
     }
+    
+    // Permitir dominios en la lista blanca
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    // Permitir dominios de prueba de Google (.usercontent.goog)
+    if (origin.includes('.usercontent.goog')) {
+      console.log('✅ Permitiendo dominio de prueba Google:', origin);
+      return callback(null, true);
+    }
+    
+    // Permitir dominios de Render para pruebas
+    if (origin.includes('.onrender.com')) {
+      console.log('✅ Permitiendo dominio Render:', origin);
+      return callback(null, true);
+    }
+    
+    // Registrar orígenes rechazados
+    console.log('⚠️ Origen rechazado:', origin);
+    callback(new Error(`Origen no permitido por CORS: ${origin}`), false);
   },
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 };
 
 app.use(cors(corsOptions));
@@ -40,14 +70,16 @@ app.get('/', (_req, res) => {
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// ---------- ENDPOINT DE CHECKOUT (ÚNICO Y VALIDADO) ----------
+// ---------- ENDPOINT DE CHECKOUT ----------
 app.post('/create-checkout-session', async (req, res) => {
   try {
     const booking = req.body || {};
     const contact = booking.contact || {};
     const addons = Array.isArray(booking.addons) ? booking.addons : [];
 
-    // Validaciones mínimas
+    console.log('📋 Datos recibidos:', JSON.stringify(booking, null, 2));
+
+    // Validaciones
     if (typeof booking.total !== 'number' || booking.total <= 0) {
       return res.status(400).json({ error: 'El total de la reserva no es válido.' });
     }
@@ -55,6 +87,7 @@ app.post('/create-checkout-session', async (req, res) => {
     const adults = Number(booking.adults || 0);
     const children = Number(booking.children || 0);
     const pax = adults + children;
+    
     if (pax <= 0) {
       return res.status(400).json({ error: 'Debes seleccionar al menos un pasajero.' });
     }
@@ -63,8 +96,10 @@ app.post('/create-checkout-session', async (req, res) => {
       return res.status(400).json({ error: 'Email de contacto inválido.' });
     }
 
-    const FRONTEND = process.env.FRONTEND_URL || '[https://wefly.com.mx](https://wefly.com.mx)';
+    const FRONTEND = process.env.FRONTEND_URL || 'https://wefly.com.mx';
     const flightDate = booking.date ? String(booking.date).split('T')[0] : 'No especificada';
+
+    console.log('💳 Creando sesión de Stripe...');
 
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
@@ -102,9 +137,11 @@ app.post('/create-checkout-session', async (req, res) => {
       },
     });
 
+    console.log('✅ Sesión creada:', session.id);
     return res.json({ id: session.id });
+
   } catch (err) {
-    console.error('❌ Error Stripe Checkout:', err);
+    console.error('❌ Error Stripe Checkout:', err.message);
     return res.status(500).json({
       error: 'No se pudo crear la sesión de pago.',
       details: err?.message || 'Error desconocido',
@@ -112,9 +149,31 @@ app.post('/create-checkout-session', async (req, res) => {
   }
 });
 
+// ---------- ENDPOINT DE VERIFICACIÓN DE PAGO ----------
+app.get('/payment-status/:sessionId', async (req, res) => {
+  try {
+    const session = await stripe.checkout.sessions.retrieve(req.params.sessionId);
+    res.json({
+      status: session.payment_status,
+      customerEmail: session.customer_details?.email,
+      amountTotal: session.amount_total / 100
+    });
+  } catch (error) {
+    console.error('❌ Error al verificar pago:', error);
+    res.status(500).json({ error: 'No se pudo verificar el pago' });
+  }
+});
+
+// ---------- MANEJO DE ERRORES ----------
+app.use((err, req, res, next) => {
+  console.error('❌ Error del servidor:', err.message);
+  res.status(500).json({ error: err.message });
+});
+
 // ---------- INICIAR SERVIDOR ----------
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => {
-  console.log(`Servidor escuchando en ${PORT}`);
-  console.log('Allowed Origins:', allowedOrigins);
+  console.log(`🚀 Servidor escuchando en puerto ${PORT}`);
+  console.log('🌍 Orígenes permitidos:', allowedOrigins);
+  console.log('🔑 Stripe configurado:', process.env.STRIPE_SECRET_KEY ? '✅' : '❌');
 });
