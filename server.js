@@ -57,58 +57,72 @@ app.use(cors(corsOptions));
 app.use(express.json()); // Permite al servidor entender los datos JSON
 
 // --- 5. Crear el Endpoint de Pago ---
-  app.post('/create-checkout-session', async (req, res) => {
-    try {
-      const bookingDetails = req.body;
-  
-      // --- VALIDACIÓN DE SEGURIDAD ---
-      if (!bookingDetails.total ||
-        typeof bookingDetails.total !== 'number' ||
+app.post('/create-checkout-session', async (req, res) => {
+  //                                   ^^^^^ IMPORTANTE: async aquí
+  try {
+    const bookingDetails = req.body;
+
+    // --- VALIDACIÓN DE SEGURIDAD ---
+    if (!bookingDetails.total || 
+        typeof bookingDetails.total !== 'number' || 
         bookingDetails.total <= 0) {
-        console.error('❌ Intento de pago con total inválido:', bookingDetails.total);
-        return res.status(400).json({
-          error: 'El total de la reserva no es válido.'
-        });
-      }
-  
-      // Validar que existan los datos mínimos necesarios
-      if (!bookingDetails.passengers || !bookingDetails.origin || !bookingDetails.destination) {
-        console.error('❌ Faltan datos de la reserva');
-        return res.status(400).json({
-          error: 'Faltan datos necesarios para la reserva.'
-        });
-      }
-  
-      console.log('✅ Creando sesión de Stripe para:', bookingDetails);
-  
-      // Crear la sesión de Stripe Checkout
-      const session = await stripe.checkout.sessions.create({
-        payment_method_types: ['card'],
-        line_items: [
-          {
-            price_data: {
-              currency: 'mxn', // Pesos mexicanos
-              product_data: {
-                name: `Vuelo: ${bookingDetails.origin} → ${bookingDetails.destination}`,
-                description: `Pasajeros: ${bookingDetails.passengers} | Fecha: ${bookingDetails.date || 'Por confirmar'}`,
-              },
-              unit_amount: Math.round(bookingDetails.total * 100), // Convertir a centavos
-            },
-            quantity: 1,
-          },
-        ],
-        mode: 'payment',
-        success_url: `${process.env.FRONTEND_URL || 'https://wefly.com.mx'}/success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${process.env.FRONTEND_URL || 'https://wefly.com.mx'}/cancel`,
-        metadata: {
-          origin: bookingDetails.origin,
-          destination: bookingDetails.destination,
-          passengers: bookingDetails.passengers.toString(),
-          date: bookingDetails.date || 'sin fecha',
-          total: bookingDetails.total.toString()
-        }
+      console.error('❌ Intento de pago con total inválido:', bookingDetails.total);
+      return res.status(400).json({ 
+        error: 'El total de la reserva no es válido.' 
       });
+    }
+
+    // Validar que existan los datos mínimos necesarios
+    if (!bookingDetails.passengers || !bookingDetails.origin || !bookingDetails.destination) {
+      console.error('❌ Faltan datos de la reserva');
+      return res.status(400).json({ 
+        error: 'Faltan datos necesarios para la reserva.' 
+      });
+    }
+
+    console.log('✅ Creando sesión de Stripe para:', bookingDetails);
+
+    // Crear la sesión de Stripe Checkout
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency: 'mxn',
+            product_data: {
+              name: `Vuelo: ${bookingDetails.origin} → ${bookingDetails.destination}`,
+              description: `Pasajeros: ${bookingDetails.passengers} | Fecha: ${bookingDetails.date || 'Por confirmar'}`,
+            },
+            unit_amount: Math.round(bookingDetails.total * 100),
+          },
+          quantity: 1,
+        },
+      ],
+      mode: 'payment',
+      success_url: `${process.env.FRONTEND_URL || 'https://wefly.com.mx'}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL || 'https://wefly.com.mx'}/cancel`,
+      metadata: {
+        origin: bookingDetails.origin,
+        destination: bookingDetails.destination,
+        passengers: bookingDetails.passengers.toString(),
+        date: bookingDetails.date || 'sin fecha',
+        total: bookingDetails.total.toString()
+      }
+    });
+
+    console.log('✅ Sesión creada exitosamente:', session.id);
+    res.json({ id: session.id });
+
+  } catch (error) {
+    console.error("❌ Error al crear la sesión de Stripe:", error.message);
+    res.status(500).json({ 
+      error: 'No se pudo crear la sesión de pago.',
+      details: error.message 
+    });
+  }
+});
   
+
       console.log('✅ Sesión creada exitosamente:', session.id);
       res.json({ id: session.id });
   
@@ -120,7 +134,7 @@ app.use(express.json()); // Permite al servidor entender los datos JSON
       });
     }
   });
-  
+
   try {
     const bookingDetails = req.body;
 
