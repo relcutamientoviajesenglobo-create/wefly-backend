@@ -8,12 +8,23 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 // --- 2. Crear la aplicación del servidor ---
 const app = express();
 
-// --- 3. Configurar CORS para producción ---
-// Solo aceptaremos peticiones que vengan de tu página web oficial.
+// --- 3. Configurar CORS para producción y pruebas ---
+const allowedOrigins = [
+  '[https://wefly.com.mx](https://wefly.com.mx)' // Tu dominio de producción
+];
+
 const corsOptions = {
-  origin: '[https://wefly.com.mx](https://wefly.com.mx)', // ¡Este es tu dominio en producción!
+  origin: (origin, callback) => {
+    // Permitimos el dominio de producción y cualquier dominio de prueba de Google (.usercontent.goog).
+    if (allowedOrigins.includes(origin) || (origin && origin.endsWith('.usercontent.goog')) || !origin) {
+      callback(null, true);
+    } else {
+      callback(new Error('No permitido por la política de CORS'));
+    }
+  },
   optionsSuccessStatus: 200
 };
+
 app.use(cors(corsOptions));
 
 // --- 4. Configurar Middleware Adicional ---
