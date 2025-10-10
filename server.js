@@ -1,3 +1,4 @@
+require('dotenv').config();
 // --- 1. Importar las herramientas ---
 const express = require('express');
 const cors = require('cors');
