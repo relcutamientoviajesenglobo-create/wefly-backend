@@ -1,156 +1,131 @@
 require('dotenv').config();
-// --- 1. Importar las herramientas ---
+
 const express = require('express');
 const cors = require('cors');
-// La clave secreta se leerá desde las variables de entorno de Render
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
-// --- 2. Crear la aplicación del servidor ---
 const app = express();
 
-// --- 3. Configurar CORS (Versión Final y Corregida) ---
-const allowedOrigins = [
-  '[https://wefly.com.mx](https://wefly.com.mx)',
-  '[https://www.wefly.com.mx](https://www.wefly.com.mx)'
+// ---------- CORS CORREGIDO ----------
+/**
+ * Define tus orígenes permitidos sin Markdown.
+ * Agrega los que uses para pruebas (por ejemplo, subdominios de Render o tu preview).
+ * También puedes usar la variable ALLOWED_ORIGINS separada por comas en Render.
+ */
+const DEFAULT_ALLOWED_ORIGINS = [
+  'https://wefly.com.mx',
+  'https://www.wefly.com.mx',
+  'http://localhost:3000'
 ];
-const corsOptions = {
-  origin: allowedOrigins
-};
-app.use(cors(corsOptions));
 
+const allowedOrigins = (process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim())
+  : DEFAULT_ALLOWED_ORIGINS
+);
+
+/**
+ * Permitimos peticiones solo si el Origin está en la lista.
+ * OJO: requests sin Origin (p. ej., curl/cron) se aceptan.
+ */
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error(`Origen no permitido por CORS: ${origin}`), false);
+  },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false,
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // preflight
 app.use(express.json());
 
-// --- 4. Crear el Endpoint de Pago (Versión Final y Corregida) ---
+// ---------- RUTAS BÁSICAS ----------
+app.get('/', (_req, res) => {
+  res.send('Servidor WEFly · CORS OK · Stripe listo 🚀');
+});
+
+app.get('/health', (_req, res) => res.json({ ok: true }));
+
+// ---------- ENDPOINT DE CHECKOUT (ÚNICO Y VALIDADO) ----------
 app.post('/create-checkout-session', async (req, res) => {
   try {
-    const bookingDetails = req.body;
+    const booking = req.body || {};
+    const contact = booking.contact || {};
+    const addons = Array.isArray(booking.addons) ? booking.addons : [];
 
-    // --- Validaciones de seguridad ---
-    if (!bookingDetails.total || typeof bookingDetails.total !== 'number' || bookingDetails.total <= 0) {
-      console.error('❌ Intento de pago con total inválido:', bookingDetails.total);
+    // Validaciones mínimas
+    if (typeof booking.total !== 'number' || booking.total <= 0) {
       return res.status(400).json({ error: 'El total de la reserva no es válido.' });
     }
 
-    console.log('✅ Creando sesión de Stripe para:', bookingDetails);
+    const adults = Number(booking.adults || 0);
+    const children = Number(booking.children || 0);
+    const pax = adults + children;
+    if (pax <= 0) {
+      return res.status(400).json({ error: 'Debes seleccionar al menos un pasajero.' });
+    }
 
-    // --- Crear la sesión de Stripe con el formato correcto ---
+    // Email opcional pero recomendado: valida formato simple si llega
+    if (contact.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact.email)) {
+      return res.status(400).json({ error: 'Email de contacto inválido.' });
+    }
+
+    const FRONTEND = process.env.FRONTEND_URL || 'https://wefly.com.mx';
+    const flightDate = booking.date ? String(booking.date).split('T')[0] : 'No especificada';
+
     const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
       payment_method_types: ['card'],
-      customer_email: bookingDetails.contact.email,
+      customer_email: contact.email || undefined,
       billing_address_collection: 'required',
       phone_number_collection: { enabled: true },
-      line_items: [{
-        price_data: {
-          currency: 'mxn',
-          product_data: {
-            name: 'Vuelo en Globo en Teotihuacán',
-            description: `Reserva para ${bookingDetails.adults} adulto(s) y ${bookingDetails.children} niño(s).`,
+
+      line_items: [
+        {
+          price_data: {
+            currency: 'mxn',
+            product_data: {
+              name: 'Vuelo en Globo en Teotihuacán',
+              description: `Reserva para ${adults} adulto(s) y ${children} niño(s).`,
+            },
+            unit_amount: Math.round(booking.total * 100), // centavos
           },
-          unit_amount: Math.round(bookingDetails.total * 100),
+          quantity: 1,
         },
-        quantity: 1,
-      }],
-      mode: 'payment',
-      success_url: `https://wefly.com.mx/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `https://wefly.com.mx/cancel`,
+      ],
+
+      success_url: `${FRONTEND}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${FRONTEND}/cancel`,
+
       metadata: {
-        nombreCliente: bookingDetails.contact.name,
-        emailCliente: bookingDetails.contact.email,
-        telefonoCliente: bookingDetails.contact.phone,
-        fechaVuelo: bookingDetails.date ? bookingDetails.date.split('T')[0] : 'No especificada',
-        adultos: bookingDetails.adults,
-        ninos: bookingDetails.children,
-        adicionales: JSON.stringify(bookingDetails.addons.map(a => a.name)),
-        total: bookingDetails.total.toString()
-      }
+        nombreCliente: contact.name || 'No proporcionado',
+        emailCliente: contact.email || 'No proporcionado',
+        telefonoCliente: contact.phone || 'No proporcionado',
+        fechaVuelo: flightDate,
+        adultos: String(adults),
+        ninos: String(children),
+        adicionales: JSON.stringify(addons.map(a => a?.name).filter(Boolean)),
+        total: String(booking.total),
+      },
     });
 
-    console.log('✅ Sesión creada exitosamente:', session.id);
-    res.json({ id: session.id });
-
-  } catch (error) {
-    console.error("❌ Error al crear la sesión de Stripe:", error.message);
-    res.status(500).json({
+    return res.json({ id: session.id });
+  } catch (err) {
+    console.error('❌ Error Stripe Checkout:', err);
+    return res.status(500).json({
       error: 'No se pudo crear la sesión de pago.',
-      details: error.message
+      details: err?.message || 'Error desconocido',
     });
   }
 });
 
-
-// --- 5. Crear el Endpoint de Pago ---
-app.post('/create-checkout-session', async (req, res) => {
-  try {
-    const bookingDetails = req.body;
-
-    // --- VALIDACIÓN DE SEGURIDAD MEJORADA ---
-    if (!bookingDetails.total || typeof bookingDetails.total !== 'number' || bookingDetails.total <= 0) {
-      console.error('❌ Intento de pago con total inválido:', bookingDetails.total);
-      return res.status(400).json({
-        error: 'El total de la reserva no es válido.'
-      });
-    }
-
-    // --- VALIDACIÓN DE DATOS CORRECTA ---
-    const totalPassengers = (bookingDetails.adults || 0) + (bookingDetails.children || 0);
-    if (totalPassengers <= 0) {
-        console.error('❌ Faltan datos de la reserva: no hay pasajeros seleccionados.');
-        return res.status(400).json({
-            error: 'Debes seleccionar al menos un pasajero.'
-        });
-    }
-
-    console.log('✅ Creando sesión de Stripe para:', bookingDetails);
-
-    // Crear la sesión de Stripe Checkout con el formato price_data correcto
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      // --- INFORMACIÓN ADICIONAL PARA STRIPE ---
-      customer_email: bookingDetails.contact.email,
-      billing_address_collection: 'required',
-      phone_number_collection: { enabled: true },
-      // -----------------------------------------
-      line_items: [{
-        price_data: {
-          currency: 'mxn',
-          product_data: {
-            name: 'Vuelo en Globo en Teotihuacán',
-            description: `Reserva para ${bookingDetails.adults} adulto(s) y ${bookingDetails.children} niño(s).`,
-          },
-          unit_amount: Math.round(bookingDetails.total * 100),
-        },
-        quantity: 1,
-      }],
-      mode: 'payment',
-      success_url: `${process.env.FRONTEND_URL || 'https://wefly.com.mx'}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.FRONTEND_URL || 'https://wefly.com.mx'}/cancel`,
-      metadata: {
-        nombreCliente: bookingDetails.contact.name,
-        emailCliente: bookingDetails.contact.email,
-        telefonoCliente: bookingDetails.contact.phone,
-        fechaVuelo: bookingDetails.date ? bookingDetails.date.split('T')[0] : 'No especificada',
-        adultos: bookingDetails.adults,
-        ninos: bookingDetails.children,
-        adicionales: JSON.stringify(bookingDetails.addons.map(a => a.name)),
-        total: bookingDetails.total.toString()
-      }
-    });
-
-    console.log('✅ Sesión creada exitosamente:', session.id);
-    res.json({ id: session.id });
-
-  } catch (error) {
-    console.error("❌ Error al crear la sesión de Stripe:", error.message);
-    res.status(500).json({
-      error: 'No se pudo crear la sesión de pago.',
-      details: error.message
-    });
-  }
-});
-
-
-
-// --- 6. Iniciar el servidor ---
-// Render provee la variable PORT automáticamente.
+// ---------- INICIAR SERVIDOR ----------
 const PORT = process.env.PORT || 4242;
-app.listen(PORT, () => console.log(`Servidor escuchando en el puerto ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Servidor escuchando en ${PORT}`);
+  console.log('Allowed Origins:', allowedOrigins);
+});
