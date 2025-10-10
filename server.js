@@ -28,6 +28,7 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
+
 // --- 4. Configurar Middleware Adicional ---
 app.use(express.json()); // Permite al servidor entender los datos JSON
 
