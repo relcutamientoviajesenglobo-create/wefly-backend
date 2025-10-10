@@ -39,6 +39,16 @@ app.post('/create-checkout-session', async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'payment',
+    
+      // --- INICIO DE LÍNEAS NUEVAS ---
+      // Hacemos que la dirección de facturación (que incluye el nombre) sea obligatoria.
+      billing_address_collection: 'required', 
+      // Habilitamos la recolección del número de teléfono.
+      phone_number_collection: { enabled: true }, 
+      // Pasamos el email para que aparezca pre-llenado en el formulario de Stripe.
+      customer_email: bookingDetails.contact.email, 
+      // --- FIN DE LÍNEAS NUEVAS ---
+    
       line_items: [{
         price_data: {
           currency: 'mxn',
@@ -46,7 +56,7 @@ app.post('/create-checkout-session', async (req, res) => {
             name: 'Vuelo en Globo We Fly',
             description: `Reserva para ${bookingDetails.adults} adulto(s) y ${bookingDetails.children} niño(s).`
           },
-          unit_amount: bookingDetails.total * 100, // Stripe usa centavos
+          unit_amount: Math.round(bookingDetails.total * 100),
         },
         quantity: 1,
       }],
