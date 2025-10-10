@@ -83,6 +83,11 @@ app.post('/create-checkout-session', async (req, res) => {
     // Crear la sesión de Stripe Checkout con el formato price_data correcto
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
+      // --- INFORMACIÓN ADICIONAL PARA STRIPE ---
+      customer_email: bookingDetails.contact.email,
+      billing_address_collection: 'required',
+      phone_number_collection: { enabled: true },
+      // -----------------------------------------
       line_items: [{
         price_data: {
           currency: 'mxn',
@@ -90,7 +95,7 @@ app.post('/create-checkout-session', async (req, res) => {
             name: 'Vuelo en Globo en Teotihuacán',
             description: `Reserva para ${bookingDetails.adults} adulto(s) y ${bookingDetails.children} niño(s).`,
           },
-          unit_amount: Math.round(bookingDetails.total * 100), // Usamos 'unit_amount' dentro de 'price_data'
+          unit_amount: Math.round(bookingDetails.total * 100),
         },
         quantity: 1,
       }],
@@ -120,6 +125,7 @@ app.post('/create-checkout-session', async (req, res) => {
     });
   }
 });
+
 
 
 // --- 6. Iniciar el servidor ---
