@@ -70,7 +70,7 @@ app.post('/create-checkout-session', async (req, res) => {
         quantity: 1,
       }],
       success_url: `https://wefly.com.mx/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `https://wefly.com.mx/cancel`,
+      cancel_url: `https://wefly.com.mx/cancelOLOPOLLO`,
       metadata: {
         nombreCliente: contact.name || 'No proporcionado',
         telefonoCliente: contact.phone || 'No proporcionado',
