@@ -14,39 +14,44 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
 // ============================================
-// CONFIGURACIÓN DE CORS (CORREGIDA)
+// CONFIGURACIÓN DE CORS (AJUSTE FINAL)
 // ============================================
 const allowedOrigins = [
   '[https://wefly.com.mx](https://wefly.com.mx)',
   '[https://www.wefly.com.mx](https://www.wefly.com.mx)',
-  'http://localhost:3000',
-  '[http://127.0.0.1:3000](http://127.0.0.1:3000)',
-  'http://localhost:5500',
-  '[http://127.0.0.1:5500](http://127.0.0.1:5500)'
+  'http://localhost:3000', // Para pruebas locales si necesitas
+  // Añade aquí cualquier otro dominio específico si es necesario
 ];
 
-app.use(cors({
+const corsOptions = {
   origin: (origin, callback) => {
+    // Permitir peticiones sin origen (ej. Postman, curl)
     if (!origin) return callback(null, true);
+
+    // Permitir dominios de la lista
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
 
     // Permitir dominios de vista previa (como el de Canvas)
     if (origin.endsWith('.usercontent.goog')) {
          return callback(null, true);
     }
 
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      console.warn(`⚠️  Origen bloqueado por CORS: ${origin}`);
-      callback(new Error('No permitido por CORS'));
-    }
+    // Si no coincide con nada, rechazar
+    console.warn(`⚠️ Origen bloqueado por CORS: ${origin}`);
+    return callback(new Error('No permitido por CORS'));
   },
-  credentials: true
-}));
+  methods: ['GET', 'POST', 'OPTIONS'], // Asegurar que OPTIONS esté permitido para preflight
+  allowedHeaders: ['Content-Type', 'Authorization'], // Headers comunes
+};
+
+app.use(cors(corsOptions)); // Aplicar configuración de CORS
+app.options('*', cors(corsOptions)); // Manejar explícitamente las peticiones OPTIONS preflight
 
 // Middleware para raw body (necesario para webhooks de Stripe)
 app.use('/webhook', express.raw({ type: 'application/json' }));
-app.use(express.json());
+app.use(express.json()); // Middleware para parsear JSON después de CORS y webhook
 
 // ============================================
 // FUNCIONES AUXILIARES (Tu validador)
@@ -178,7 +183,8 @@ app.post('/webhook', async (req, res) => {
   let event;
 
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    // Usa req.body directamente porque ya configuramos express.raw para esta ruta
+    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret); 
   } catch (err) {
     console.error('❌ Webhook signature inválida:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -223,14 +229,19 @@ app.post('/webhook', async (req, res) => {
   res.json({ received: true });
 });
 
-// ... (El resto de tu excelente código de manejo de errores y startup) ...
-
 // ============================================
 // MANEJO DE ERRORES GLOBAL
 // ============================================
 app.use((err, req, res, next) => {
+  // Manejo específico para errores de CORS
+  if (err.message && err.message.startsWith('No permitido por CORS')) {
+    console.error('❌ Error de CORS:', err.message);
+    return res.status(403).json({ error: 'Acceso denegado por CORS' });
+  }
+
+  // Otros errores
   console.error('\n❌ Error no manejado:');
-  console.error(err.stack);
+  console.error(err.stack || err.message);
 
   res.status(500).json({ 
     error: 'Error interno del servidor',
@@ -275,23 +286,8 @@ app.listen(PORT, () => {
   `);
 });
 
-// Manejo de cierre graceful
-process.on('SIGTERM', () => {
-  console.log('\n👋 Señal SIGTERM recibida. Cerrando servidor...');
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('\n👋 Señal SIGINT recibida. Cerrando servidor...');
-  process.exit(0);
-});
-
-// Manejo de errores no capturados
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ Promesa rechazada no manejada:', reason);
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('❌ Excepción no capturada:', error);
-  process.exit(1);
-});
+// Manejo de cierre graceful y errores no capturados (tu código excelente)
+process.on('SIGTERM', () => { console.log('\n👋 SIGTERM. Cerrando...'); process.exit(0); });
+process.on('SIGINT', () => { console.log('\n👋 SIGINT. Cerrando...'); process.exit(0); });
+process.on('unhandledRejection', (reason) => { console.error('❌ Promesa rechazada no manejada:', reason); });
+process.on('uncaughtException', (error) => { console.error('❌ Excepción no capturada:', error); process.exit(1); });
