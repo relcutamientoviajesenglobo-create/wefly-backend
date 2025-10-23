@@ -5,257 +5,231 @@ const cors = require('cors');
 // ============================================
 // VALIDACIONES INICIALES
 // ============================================
+// Valida que la clave secreta de Stripe exista antes de iniciar
 if (!process.env.STRIPE_SECRET_KEY) {
-  console.error('❌ ERROR FATAL: STRIPE_SECRET_KEY no definida en .env');
-  process.exit(1);
+  console.error('❌ FATAL ERROR: La variable STRIPE_SECRET_KEY no está definida en el entorno.');
+  process.exit(1); // Detiene el servidor si no hay clave
+}
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
+// Secreto del Webhook (OBLIGATORIO para verificar eventos de Stripe)
+const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+if (!endpointSecret) {
+    console.warn('⚠️ ADVERTENCIA: STRIPE_WEBHOOK_SECRET no está definido. Los webhooks no serán verificados.');
 }
 
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
 // ============================================
-// CONFIGURACIÓN DE CORS (AJUSTE FINAL)
+// CONFIGURACIÓN DE CORS (Versión Final y Corregida)
 // ============================================
 const allowedOrigins = [
-  '[https://wefly.com.mx](https://wefly.com.mx)',
-  '[https://www.wefly.com.mx](https://www.wefly.com.mx)',
-  'http://localhost:3000', // Para pruebas locales si necesitas
-  // Añade aquí cualquier otro dominio específico si es necesario
+  'https://wefly.com.mx',
+  'https://www.wefly.com.mx',
+  'http://localhost:3000', // Puertos locales para pruebas
+  'http://127.0.0.1:3000',
+  'http://localhost:5500', // Puerto común para Live Server
+  'http://127.0.0.1:5500'
 ];
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Permitir peticiones sin origen (ej. Postman, curl)
-    if (!origin) return callback(null, true);
-
-    // Permitir dominios de la lista
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
+    // Permite peticiones de la lista de dominios o sin origen (ej. Postman, curl)
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true); // Permitir
+    } else {
+       console.warn(`⚠️ Origen bloqueado por CORS: ${origin}`); // Loguear origen bloqueado
+      callback(new Error(`Origen no permitido por CORS: ${origin}`), false); // Bloquear
     }
-
-    // Permitir dominios de vista previa (como el de Canvas)
-    if (origin.endsWith('.usercontent.goog')) {
-         return callback(null, true);
-    }
-
-    // Si no coincide con nada, rechazar
-    console.warn(`⚠️ Origen bloqueado por CORS: ${origin}`);
-    return callback(new Error('No permitido por CORS'));
   },
-  methods: ['GET', 'POST', 'OPTIONS'], // Asegurar que OPTIONS esté permitido para preflight
-  allowedHeaders: ['Content-Type', 'Authorization'], // Headers comunes
+   methods: ['GET', 'POST', 'OPTIONS'], // Asegurar OPTIONS para preflight
+   allowedHeaders: ['Content-Type', 'Authorization']
 };
-
-app.use(cors(corsOptions)); // Aplicar configuración de CORS
-app.options('*', cors(corsOptions)); // Manejar explícitamente las peticiones OPTIONS preflight
-
-// Middleware para raw body (necesario para webhooks de Stripe)
-app.use('/webhook', express.raw({ type: 'application/json' }));
-app.use(express.json()); // Middleware para parsear JSON después de CORS y webhook
+app.use(cors(corsOptions)); // Aplicar configuración de CORS PRIMERO
 
 // ============================================
-// FUNCIONES AUXILIARES (Tu validador)
+// MIDDLEWARE
 // ============================================
-const validarBooking = (booking) => {
-  const errores = [];
-  if (!booking || typeof booking !== 'object') {
-    errores.push('Datos de reserva inválidos');
-    return errores;
+// Middleware para parsear JSON, EXCEPTO para la ruta del webhook
+app.use((req, res, next) => {
+  if (req.originalUrl === '/webhook') {
+    next(); // Saltar parsing JSON para webhook, usar raw body
+  } else {
+    express.json()(req, res, next); // Usar parsing JSON para todas las demás rutas
   }
-  const total = Number(booking.total);
-  if (!total || total <= 0 || isNaN(total)) {
-    errores.push('Total debe ser mayor a 0');
-  }
-  const adults = Number(booking.adults) || 0;
-  const children = Number(booking.children) || 0;
-  if (adults + children <= 0) {
-    errores.push('Debe haber al menos un pasajero');
-  }
-  const contact = booking.contact || {};
-  if (!contact.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact.email)) {
-    errores.push('Email inválido o vacío');
-  }
-  if (!contact.name || contact.name.trim().length < 2) {
-    errores.push('Nombre debe tener al menos 2 caracteres');
-  }
-  if (!contact.phone || contact.phone.trim().length < 10) {
-    errores.push('Teléfono debe tener al menos 10 dígitos');
-  }
-  if (!booking.date) {
-    errores.push('Fecha de vuelo requerida');
-  }
-  return errores;
-};
+});
 
 // ============================================
 // RUTAS
 // ============================================
 
-// Health check
+// Ruta raíz para health check
 app.get('/', (_req, res) => {
   res.json({ 
     status: 'ok', 
-    service: 'WEFly Stripe Server (Elements)',
-    version: '2.0.0',
-    stripe: 'connected'
+    service: 'WEFly Stripe Server',
+    timestamp: new Date().toISOString()
   });
 });
 
-// --- NUEVO ENDPOINT PARA STRIPE ELEMENTS ---
+// --- Endpoint para crear Payment Intent (para Stripe Elements) ---
 app.post('/create-payment-intent', async (req, res) => {
-  const startTime = Date.now();
   try {
-    const booking = req.body;
-    console.log('\n📝 Nueva solicitud de Payment Intent recibida');
+    const booking = req.body || {};
+    const contact = booking.contact || {}; // Asegurar que contact existe
 
-    // Validar datos
-    const errores = validarBooking(booking);
-    if (errores.length > 0) {
-      console.error('❌ Validación fallida:', errores);
-      return res.status(400).json({ 
-        error: 'Datos inválidos',
-        detalles: errores 
-      });
+    // --- Validaciones robustas ---
+    if (typeof booking.total !== 'number' || booking.total <= 0) {
+      console.error('Error de validación: Total inválido', booking.total);
+      return res.status(400).json({ error: 'El total de la reserva no es válido.' });
+    }
+    const pax = (Number(booking.adults) || 0) + (Number(booking.children) || 0);
+    if (pax <= 0) {
+      console.error('Error de validación: No hay pasajeros');
+      return res.status(400).json({ error: 'Debes seleccionar al menos un pasajero.' });
+    }
+     // Validar email si existe
+     if (contact.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact.email)) {
+        console.error('Error de validación: Email inválido', contact.email);
+        return res.status(400).json({ error: 'Email de contacto inválido.' });
+     }
+
+
+    console.log(`✅ Creando Payment Intent para: $${booking.total} MXN`);
+    console.log(`   Cliente: ${contact.name || 'N/A'}, Email: ${contact.email || 'N/A'}`);
+
+
+    // Crear el Payment Intent en Stripe
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: Math.round(booking.total * 100), // Total en centavos
+      currency: 'mxn',
+      automatic_payment_methods: { enabled: true }, // Stripe gestiona los métodos de pago
+      // Opcional: descripción que puede aparecer en el extracto bancario (limitado)
+      // statement_descriptor_suffix: 'WEFLY VueloGlobo', 
+      metadata: { // Guardar información relevante de la reserva
+        nombreCliente: contact.name || 'No proporcionado',
+        emailCliente: contact.email || 'No proporcionado',
+        telefonoCliente: contact.phone || 'No proporcionado',
+        fechaVuelo: booking.date ? String(booking.date).split('T')[0] : 'No especificada',
+        totalPasajeros: String(pax),
+        totalPagadoMXN: String(booking.total),
+        addons: booking.addons ? JSON.stringify(booking.addons.map(a => a.name)) : '[]',
+      },
+      // Puedes añadir receipt_email si quieres que Stripe envíe un recibo básico
+       receipt_email: contact.email || undefined, 
+    });
+
+    console.log('✅ Payment Intent creado:', paymentIntent.id);
+    // Enviar SOLO el client_secret al frontend
+    res.send({
+      clientSecret: paymentIntent.client_secret,
+    });
+
+  } catch (err) {
+    console.error('❌ Error al crear Payment Intent:', err.message);
+    res.status(500).json({ error: 'No se pudo iniciar el proceso de pago.' });
+  }
+});
+
+// --- Endpoint de Webhook (IMPORTANTE para confirmar pagos) ---
+// Usa express.raw() para obtener el cuerpo sin parsear
+app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    let event;
+
+    if (!endpointSecret) {
+         console.error('❌ Webhook no procesado: Falta STRIPE_WEBHOOK_SECRET');
+        return res.status(400).send('Webhook secret no configurado.');
     }
 
-    const contact = booking.contact;
-    const adults = Number(booking.adults) || 0;
-    const children = Number(booking.children) || 0;
-    const pax = adults + children;
-    const flightDate = booking.date 
-      ? new Date(booking.date).toISOString().split('T')[0]
-      : 'No especificada';
+    try {
+        // Verificar la firma del webhook
+        event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+    } catch (err) {
+        console.error(`❌ Error en verificación de Webhook: ${err.message}`);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
 
-    console.log(`💰 Creando Payment Intent por $${booking.total} MXN`);
+    console.log(`🎯 Webhook recibido: ${event.type}`);
 
-    // Crear el PaymentIntent
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: Math.round(booking.total * 100), // Stripe usa centavos
-      currency: 'mxn',
-      payment_method_types: ['card'],
-      description: `Reserva Vuelo en Globo para ${pax} pasajero(s)`,
-      receipt_email: contact.email,
-      metadata: {
-        nombreCliente: contact.name,
-        emailCliente: contact.email,
-        telefonoCliente: contact.phone,
-        motivoVuelo: contact.reason || 'No especificado',
-        fechaVuelo: flightDate,
-        totalPasajeros: String(pax),
-        totalMXN: String(booking.total),
-        addons: booking.addons ? JSON.stringify(booking.addons.map(a => a.name)) : '[]',
-      }
-    });
+    // Manejar el evento específico
+    switch (event.type) {
+        case 'payment_intent.succeeded':
+            const paymentIntentSucceeded = event.data.object;
+            console.log('💰 PaymentIntent Succeeded:', paymentIntentSucceeded.id);
+            // Loguear datos importantes para tu lógica de negocio
+            console.log('   Email (si Stripe lo tiene):', paymentIntentSucceeded.receipt_email || paymentIntentSucceeded.customer_details?.email); 
+            console.log('   Monto:', paymentIntentSucceeded.amount / 100, paymentIntentSucceeded.currency.toUpperCase());
+            console.log('   Metadata:', paymentIntentSucceeded.metadata);
+            
+            // 🔥 AQUÍ IMPLEMENTA TU LÓGICA DE NEGOCIO POST-PAGO:
+            // -----------------------------------------------------
+            // 1. **Evitar duplicados:** Busca en tu base de datos si ya procesaste este paymentIntentSucceeded.id. Si sí, responde 200 OK y sal.
+            //    const yaProcesado = await db.buscarPago(paymentIntentSucceeded.id);
+            //    if (yaProcesado) { break; } // Salir si ya se procesó
+            
+            // 2. **Obtener datos de la reserva:** Usa la metadata para encontrar/crear la reserva.
+            //    const reserva = await db.crearOActualizarReserva(paymentIntentSucceeded.metadata);
+            
+            // 3. **Marcar como pagada:** Actualiza el estado de la reserva.
+            //    await db.marcarReservaPagada(reserva.id, paymentIntentSucceeded.id);
+            
+            // 4. **Enviar confirmaciones:**
+            //    await enviarEmailConfirmacionCliente(paymentIntentSucceeded.metadata.emailCliente, reserva);
+            //    await notificarEquipoVentas(reserva);
+            
+            // 5. **Actualizar inventario/disponibilidad** si aplica.
+            // -----------------------------------------------------
+            console.log('   (Simulando lógica post-pago...)'); 
+            
+            break;
+            
+        case 'payment_intent.payment_failed':
+            const paymentIntentFailed = event.data.object;
+            console.log('❌ PaymentIntent Failed:', paymentIntentFailed.id);
+            console.log('   Error:', paymentIntentFailed.last_payment_error?.message);
+            // Opcional: Notificar al cliente o al equipo sobre el fallo. Podrías enviar un email.
+            // await enviarEmailPagoFallido(paymentIntentFailed.metadata.emailCliente, paymentIntentFailed.last_payment_error?.message);
+            break;
+            
+         case 'charge.succeeded':
+             // Útil para obtener detalles del cargo si necesitas el ID del cargo (`ch_...`)
+             const chargeSucceeded = event.data.object;
+             console.log('✅ Charge Succeeded:', chargeSucceeded.id, 'for PaymentIntent:', chargeSucceeded.payment_intent);
+             // Puedes guardar chargeSucceeded.receipt_url si quieres ofrecer un enlace al recibo de Stripe.
+             break;
+             
+        // ... maneja otros eventos que puedan ser relevantes para tu flujo ...
+        // ej. 'payment_intent.processing', 'payment_intent.canceled'
+        
+        default:
+            console.log(`🤷 Evento no manejado: ${event.type}`);
+    }
 
-    const duration = Date.now() - startTime;
-    console.log(`✅ Payment Intent creado: ${paymentIntent.id} (${duration}ms)`);
-
-    // Enviar solo el client_secret al frontend
-    return res.json({ 
-      clientSecret: paymentIntent.client_secret 
-    });
-
-  } catch (err) {
-    console.error('\n❌ Error al crear Payment Intent:', {
-      mensaje: err.message,
-      tipo: err.type,
-    });
-    return res.status(500).json({ 
-      error: 'Error al procesar el pago',
-      detalles: err.message
-    });
-  }
-});
-
-
-// ============================================
-// WEBHOOK DE STRIPE (Sigue siendo vital)
-// ============================================
-app.post('/webhook', async (req, res) => {
-  const sig = req.headers['stripe-signature'];
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-
-  if (!webhookSecret) {
-    console.warn('⚠️  STRIPE_WEBHOOK_SECRET no configurado');
-    return res.status(500).send('Webhook no configurado correctamente');
-  }
-
-  let event;
-
-  try {
-    // Usa req.body directamente porque ya configuramos express.raw para esta ruta
-    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret); 
-  } catch (err) {
-    console.error('❌ Webhook signature inválida:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  console.log(`\n🎯 Webhook recibido: ${event.type}`);
-
-  // Manejar eventos (AHORA NOS INTERESA 'payment_intent.succeeded')
-  switch (event.type) {
-    case 'payment_intent.succeeded':
-      const paymentIntent = event.data.object;
-      console.log('💰 ¡Pago completado exitosamente!');
-      console.log({
-        intentId: paymentIntent.id,
-        email: paymentIntent.receipt_email,
-        monto: `$${paymentIntent.amount / 100} ${paymentIntent.currency.toUpperCase()}`,
-        metadata: paymentIntent.metadata
-      });
-
-      // 🔥 AQUÍ IMPLEMENTA TU LÓGICA (igual que antes):
-      // - Guardar reserva en base de datos
-      // - Enviar email de confirmación
-
-      break;
-
-    case 'payment_intent.payment_failed':
-      console.log('❌ Pago fallido:', {
-        id: event.data.object.id,
-        error: event.data.object.last_payment_error?.message
-      });
-      break;
-
-    // Aún es bueno escuchar el de checkout por si acaso
-    case 'checkout.session.completed':
-      console.log('ℹ️  Evento de Checkout Session completado (flujo antiguo o diferente)');
-      break;
-
-    default:
-      console.log(`ℹ️  Evento no manejado: ${event.type}`);
-  }
-
-  res.json({ received: true });
+    // Devolver un 200 a Stripe para confirmar que recibiste el evento
+    res.json({ received: true });
 });
 
 // ============================================
-// MANEJO DE ERRORES GLOBAL
+// MANEJO DE ERRORES GLOBAL (Debe ir al final)
 // ============================================
 app.use((err, req, res, next) => {
-  // Manejo específico para errores de CORS
-  if (err.message && err.message.startsWith('No permitido por CORS')) {
-    console.error('❌ Error de CORS:', err.message);
-    return res.status(403).json({ error: 'Acceso denegado por CORS' });
+  // Manejar errores específicos de CORS que pueden ocurrir ANTES de las rutas
+  if (err.message && err.message.includes('No permitido por CORS')) {
+    console.error(`❌ Error de CORS bloqueado: Origen ${req.headers.origin || 'desconocido'}`);
+    // No enviar detalles del error al cliente por seguridad
+    return res.status(403).json({ error: 'Acceso denegado.' }); 
   }
-
-  // Otros errores
-  console.error('\n❌ Error no manejado:');
-  console.error(err.stack || err.message);
-
+  
+  // Otros errores que lleguen aquí
+  console.error('❌ Error no manejado en la aplicación:', err.stack || err.message);
+  
+  // Enviar respuesta genérica en producción
+  const isDevelopment = process.env.NODE_ENV === 'development';
   res.status(500).json({ 
-    error: 'Error interno del servidor',
-    mensaje: process.env.NODE_ENV === 'development' 
-      ? err.message 
-      : 'Algo salió mal. Por favor contacta soporte.'
-  });
-});
-
-// Ruta 404
-app.use((req, res) => {
-  res.status(404).json({
-    error: 'Ruta no encontrada',
-    path: req.path
+    error: 'Error interno del servidor.',
+    // Solo mostrar detalles en desarrollo por seguridad
+    details: isDevelopment ? err.message : undefined 
   });
 });
 
@@ -266,28 +240,29 @@ const PORT = process.env.PORT || 4242;
 
 app.listen(PORT, () => {
   console.log(`
-╔════════════════════════════════════════╗
-║   🎈 WEFly Stripe Server (Elements) 🎈 ║
-╚════════════════════════════════════════╝
-
-🚀 Estado:      ACTIVO
-📍 Puerto:      ${PORT}
-🔐 Stripe:      ${process.env.STRIPE_SECRET_KEY ? 'Configurado' : 'NO CONFIGURADO'}
-🪝 Webhook:     ${process.env.STRIPE_WEBHOOK_SECRET ? 'Configurado' : 'NO CONFIGURADO'}
-🌍 Entorno:     ${process.env.NODE_ENV || 'development'}
-⏰ Iniciado:    ${new Date().toLocaleString('es-MX', { timeZone: 'America/Mexico_City' })}
-
-🔗 Endpoints disponibles:
-   GET  /                          → Health check
-   POST /create-payment-intent     → Crear intención de pago (Elements)
-   POST /webhook                   → Webhook de Stripe
-
-📝 Logs: Todos los eventos se registran en consola
+🚀 Servidor WEFly Stripe Elements está ACTIVO 🚀
+--------------------------------------------------
+  Puerto:      ${PORT}
+  Entorno:     ${process.env.NODE_ENV || 'development'}
+  Stripe Key:  ${process.env.STRIPE_SECRET_KEY ? 'Cargada correctamente' : '¡¡NO CONFIGURADA!!'}
+  Webhook Key: ${endpointSecret ? 'Cargada correctamente' : '¡¡NO CONFIGURADA!! (Requerida para producción)'}
+  Orígenes CORS permitidos: ${allowedOrigins.join(', ')}
+  Iniciado:    ${new Date().toLocaleString('es-MX')}
+--------------------------------------------------
+  Endpoints:
+    GET  /                          -> Health Check
+    POST /create-payment-intent   -> Iniciar Pago (Stripe Elements)
+    POST /webhook                   -> Recibir eventos de Stripe
+--------------------------------------------------
   `);
 });
 
-// Manejo de cierre graceful y errores no capturados (tu código excelente)
-process.on('SIGTERM', () => { console.log('\n👋 SIGTERM. Cerrando...'); process.exit(0); });
-process.on('SIGINT', () => { console.log('\n👋 SIGINT. Cerrando...'); process.exit(0); });
-process.on('unhandledRejection', (reason) => { console.error('❌ Promesa rechazada no manejada:', reason); });
-process.on('uncaughtException', (error) => { console.error('❌ Excepción no capturada:', error); process.exit(1); });
+// Manejo opcional para cierre limpio
+process.on('SIGTERM', () => {
+  console.log('SIGTERM recibido. Cerrando servidor...');
+  process.exit(0);
+});
+process.on('SIGINT', () => {
+  console.log('SIGINT recibido (Ctrl+C). Cerrando servidor...');
+  process.exit(0);
+});
