@@ -1,4 +1,4 @@
-// server.js
+// server.js (FINAL)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -58,7 +58,7 @@ function computeTotalMXN(booking) {
     const price = Number(a?.price) || 0;
     if (!name) continue;
     if (name === 'Desayuno en La Cueva') {
-      addonsTotal += price * pax; // p/p
+      addonsTotal += price * pax; // por persona
     } else {
       addonsTotal += price;       // por grupo
     }
@@ -104,15 +104,14 @@ function buildProductTexts(booking) {
 }
 
 function sanitizeStripeError(err) {
-  // Devuelve mensaje entendible al front (sin datos sensibles)
   const base = err?.raw?.message || err.message || 'Error al crear sesión de pago.';
   const code = err?.raw?.code || err.code || '';
-  // Mensajes más claros para casos comunes:
-  if (code === 'payment_method_type_unavailable' || base.toLowerCase().includes('payment_method_types') && base.toLowerCase().includes('oxxo')) {
+  if (code === 'payment_method_type_unavailable' ||
+      (String(base).toLowerCase().includes('payment_method_types') && String(base).toLowerCase().includes('oxxo'))) {
     return 'Tu cuenta de Stripe no tiene OXXO habilitado o este método no está disponible. Pagos con tarjeta siguen disponibles.';
   }
-  if (base.toLowerCase().includes('invalid email')) return 'Email de contacto inválido.';
-  if (base.toLowerCase().includes('amount')) return 'Monto inválido para crear el pago.';
+  if (String(base).toLowerCase().includes('invalid email')) return 'Email de contacto inválido.';
+  if (String(base).toLowerCase().includes('amount')) return 'Monto inválido para crear el pago.';
   return base;
 }
 
@@ -120,7 +119,6 @@ function sanitizeStripeError(err) {
 app.post('/create-checkout-session', async (req, res) => {
   try {
     const booking = req.body || {};
-    const { contact } = buildProductTexts(booking);
 
     // Recalcular total en servidor
     const amountMXN = computeTotalMXN(booking);
@@ -128,7 +126,9 @@ app.post('/create-checkout-session', async (req, res) => {
       return res.status(400).json({ error: 'Total inválido.' });
     }
 
-    // Validaciones
+    const { contact, pasajeros, adultos, ninos, productName, fechaVueloTxt, descripcionCompleta } = buildProductTexts(booking);
+
+    // Validaciones clave
     const pax = (Number(booking.adults)||0) + (Number(booking.children)||0);
     if (pax <= 0) {
       return res.status(400).json({ error: 'Debes seleccionar al menos un pasajero.' });
@@ -137,9 +137,7 @@ app.post('/create-checkout-session', async (req, res) => {
       return res.status(400).json({ error: 'Email de contacto inválido.' });
     }
 
-    const { pasajeros, adultos, ninos, productName, fechaVueloTxt, descripcionCompleta } = buildProductTexts(booking);
-
-    // Conjunto de métodos de pago (intentamos incluir OXXO si está habilitado)
+    // Métodos de pago (fallback si OXXO no disponible)
     const pmTypesBase = ['card'];
     if (ENABLE_OXXO) pmTypesBase.push('oxxo');
 
@@ -148,6 +146,7 @@ app.post('/create-checkout-session', async (req, res) => {
         mode: 'payment',
         locale: 'es',
         currency: 'mxn',
+
         line_items: [{
           quantity: 1,
           price_data: {
@@ -162,22 +161,73 @@ app.post('/create-checkout-session', async (req, res) => {
                 ninos: String(ninos),
                 addonsSeleccionados: JSON.stringify((booking.addons || []).map(a => a.name || a)),
                 fechaVuelo: fechaVueloTxt,
-                pasajeros: JSON.stringify(pasajeros),
+                pasajeros: JSON.stringify(pasajeros), // nombre + peso
                 totalServidorMXN: String(amountMXN)
               }
             }
           }
         }],
+
         allow_promotion_codes: false,
         billing_address_collection: 'auto',
         phone_number_collection: { enabled: true },
+
         payment_method_types: paymentMethodTypes,
         payment_method_options: paymentMethodTypes.includes('oxxo') ? { oxxo: { expires_after_days: 2 } } : undefined,
+
+        // Recibo por correo & descripción en el cobro
+        payment_intent_data: {
+          receipt_email: contact.email || undefined,
+          description: descripcionCompleta.slice(0, 500),
+          metadata: {
+            descripcionCompleta,
+            nombreCliente: contact.name || 'No proporcionado',
+            emailCliente: contact.email || 'No proporcionado',
+            telefonoCliente: contact.phone || 'No proporcionado',
+            fechaVuelo: fechaVueloTxt,
+            adultos: String(adultos),
+            ninos: String(ninos),
+            pasajeros: JSON.stringify(pasajeros),
+            addons: JSON.stringify((booking.addons || []).map(a => a.name || a)),
+            totalServidorMXN: String(amountMXN)
+          }
+        },
+
+        // Customer + Factura (PDF/email) con descripción y metadatos
         customer_email: contact.email || undefined,
+        customer_creation: 'always',
+        invoice_creation: {
+          enabled: true,
+          invoice_data: {
+            description: descripcionCompleta, // aparece en PDF/correo de factura
+            metadata: {
+              descripcionCompleta,
+              nombreCliente: contact.name || 'No proporcionado',
+              emailCliente: contact.email || 'No proporcionado',
+              telefonoCliente: contact.phone || 'No proporcionado',
+              fechaVuelo: fechaVueloTxt,
+              adultos: String(adultos),
+              ninos: String(ninos),
+              pasajeros: JSON.stringify(pasajeros),
+              addons: JSON.stringify((booking.addons || []).map(a => a.name || a)),
+              totalServidorMXN: String(amountMXN)
+            },
+            custom_fields: [
+              { name: 'Fecha de vuelo', value: fechaVueloTxt },
+              { name: 'Pasajeros', value: `${adultos} adulto(s), ${ninos} niño(s)` }
+            ],
+            footer: 'Gracias por volar con We Fly. Atención: +52 55 1234 5678 • wefly.com.mx'
+          }
+        },
+
         success_url: `${FRONTEND_URL}/?checkout=success`,
         cancel_url: `${FRONTEND_URL}/?checkout=cancel`,
+
+        // Visibles en el panel
         description: descripcionCompleta,
         statement_descriptor_suffix: 'WEFLY GLOBO',
+
+        // Metadatos a nivel sesión
         metadata: {
           descripcionCompleta,
           nombreCliente: contact.name || 'No proporcionado',
