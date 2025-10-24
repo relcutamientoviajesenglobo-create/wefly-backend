@@ -9,9 +9,8 @@ if (!process.env.STRIPE_SECRET_KEY) {
   process.exit(1);
 }
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-
-// (Opcional) Webhook para manejar eventos de Stripe
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET || null;
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://wefly.com.mx';
 
 const app = express();
 
@@ -34,13 +33,13 @@ app.use(cors({
   allowedHeaders: ['Content-Type','Authorization']
 }));
 
-// JSON para todas menos /webhook
+// JSON para todas menos /webhook (que necesita raw)
 app.use((req, res, next) => {
   if (req.originalUrl === '/webhook') return next();
   return express.json()(req, res, next);
 });
 
-// ===== Config precios (server-side, evita fraude) =====
+// ===== Precios (server-side) =====
 const PRICES = { adult: 2500, child: 2200 }; // MXN
 
 function computeTotalMXN(booking) {
@@ -74,35 +73,50 @@ app.get('/', (_req, res) => {
 app.post('/create-checkout-session', async (req, res) => {
   try {
     const booking = req.body || {};
-    // Recalcular total en servidor (seguro)
+    const contact = booking.contact || {};
+    const pasajeros = Array.isArray(booking.passengers) ? booking.passengers : [];
+
+    // Recalcular total seguro
     const amountMXN = computeTotalMXN(booking);
     if (amountMXN <= 0) {
       return res.status(400).json({ error: 'Total inválido.' });
     }
 
-    // Validaciones básicas de contacto
-    const contact = booking.contact || {};
-    if (contact.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact.email)) {
-      return res.status(400).json({ error: 'Email de contacto inválido.' });
-    }
+    // Validaciones básicas
     const pax = (Number(booking.adults)||0) + (Number(booking.children)||0);
     if (pax <= 0) {
       return res.status(400).json({ error: 'Debes seleccionar al menos un pasajero.' });
     }
+    if (contact.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact.email)) {
+      return res.status(400).json({ error: 'Email de contacto inválido.' });
+    }
 
-    // Nombre producto para el recibo / panel
+    // ===== Construcción del nombre/descripcion (completo y plural) =====
+    const adultos = Number(booking.adults) || 0;
+    const ninos   = Number(booking.children) || 0;
+
+    const textoAdultos = adultos === 1 ? '1 Adulto' : `${adultos} Adultos`;
+    const textoNinos   = ninos   === 1 ? '1 Niño'   : `${ninos} Niños`;
+
     const addonsLabel = Array.isArray(booking.addons) && booking.addons.length
-      ? ' + ' + booking.addons.map(a => (a.name || a)).join(' + ')
+      ? ' + ' + booking.addons.map(a => (a.name || a)).join(' y ')
       : '';
-    const productName = `Vuelo en Globo (${booking.adults} Ad, ${booking.children} Niñ)${addonsLabel}`.slice(0, 120);
 
-    // URLs de retorno (ajusta tu dominio del frontend)
-    const FRONTEND_URL = process.env.FRONTEND_URL || 'https://wefly.com.mx';
-    const successUrl = `${FRONTEND_URL}/?checkout=success`;
-    const cancelUrl  = `${FRONTEND_URL}/?checkout=cancel`;
+    const productName = `Vuelo en Globo (${textoAdultos}, ${textoNinos})${addonsLabel}`;
 
-    // Crear sesión Checkout (tarjeta, wallets y OXXO)
-    // Nota: Google/Apple Pay entran por "card" y "automatic_tax/wallets"
+    const passengerDetailsText = pasajeros.length
+      ? pasajeros.map((p, i) => `Pasajero ${i + 1}: ${p.name || 'Sin nombre'} (${p.weight || 'Sin peso'} kg)`).join('; ')
+      : 'Sin información de pasajeros';
+
+    const fechaVueloTxt = booking.date ? String(booking.date) : 'No especificada';
+
+    const descripcionCompleta =
+      `${productName}. ${passengerDetailsText}. ` +
+      `Fecha de vuelo: ${fechaVueloTxt}. ` +
+      `Cliente: ${contact.name || 'No proporcionado'} ` +
+      `(${contact.email || 'Sin correo'}, ${contact.phone || 'Sin teléfono'}).`;
+
+    // ===== Crear sesión de Checkout =====
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       locale: 'es',
@@ -114,9 +128,15 @@ app.post('/create-checkout-session', async (req, res) => {
           unit_amount: amountMXN * 100, // centavos
           product_data: {
             name: productName,
+            description: descripcionCompleta.slice(0, 500), // límite aproximado
             metadata: {
-              pax: String(pax),
-              fechaVuelo: booking.date ? String(booking.date) : 'No especificada'
+              tipoProducto: 'Vuelo en Globo',
+              adultos: String(adultos),
+              ninos: String(ninos),
+              addonsSeleccionados: JSON.stringify((booking.addons || []).map(a => a.name || a)),
+              fechaVuelo: fechaVueloTxt,
+              pasajeros: JSON.stringify(pasajeros), // Nombre + Peso
+              totalServidorMXN: String(amountMXN)
             }
           }
         }
@@ -124,23 +144,35 @@ app.post('/create-checkout-session', async (req, res) => {
       allow_promotion_codes: false,
       billing_address_collection: 'auto',
       phone_number_collection: { enabled: true },
-      // habilita métodos (oxxo + card)
+
+      // Apple/Google Pay entran por "card"; OXXO explícito
       payment_method_types: ['card', 'oxxo'],
       payment_method_options: {
-        oxxo: { expires_after_days: 2 } // vence en 2 días (ajustable)
+        oxxo: { expires_after_days: 2 }
       },
+
+      // Branding del Checkout: se controla en Dashboard > Settings > Branding
+      // (Checkout no admite logo por sesión; es a nivel cuenta)
+
       customer_email: contact.email || undefined,
-      success_url: successUrl,
-      cancel_url: cancelUrl,
-      // Metadata útil para post-procesar
+      success_url: `${FRONTEND_URL}/?checkout=success`,
+      cancel_url: `${FRONTEND_URL}/?checkout=cancel`,
+
+      // campos “altamente visibles” en Stripe
+      description: descripcionCompleta,
+      statement_descriptor_suffix: 'WEFLY GLOBO',
+
+      // metadatos adicionales (nivel sesión)
       metadata: {
+        descripcionCompleta,
         nombreCliente: contact.name || 'No proporcionado',
         emailCliente: contact.email || 'No proporcionado',
         telefonoCliente: contact.phone || 'No proporcionado',
-        fechaVuelo: booking.date ? String(booking.date) : 'No especificada',
-        adultos: String(booking.adults || 0),
-        ninos: String(booking.children || 0),
-        addons: JSON.stringify((booking.addons||[]).map(a => a.name || a)),
+        fechaVuelo: fechaVueloTxt,
+        adultos: String(adultos),
+        ninos: String(ninos),
+        pasajeros: JSON.stringify(pasajeros),
+        addons: JSON.stringify((booking.addons || []).map(a => a.name || a)),
         totalServidorMXN: String(amountMXN)
       }
     });
@@ -152,10 +184,10 @@ app.post('/create-checkout-session', async (req, res) => {
   }
 });
 
-// ===== Webhook (opcional, recomendado en producción) =====
+// ===== Webhook (opcional, recomendado) =====
 app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
   if (!endpointSecret) {
-    console.warn('⚠️ Webhook sin verificar (falta STRIPE_WEBHOOK_SECRET)');
+    console.warn('⚠️ Webhook sin verificar (falta STRIPE_WEBHOOK_SECRET). Respondiendo 200 para pruebas.');
     return res.status(200).json({ received: true });
   }
   const sig = req.headers['stripe-signature'];
@@ -165,16 +197,18 @@ app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
 
     if (event.type === 'checkout.session.completed') {
       const sess = event.data.object;
-      console.log('✅ Checkout pagado:', sess.id, sess.payment_status);
-      // TODO: tu lógica post-pago (crear reserva, enviar email, etc.)
+      console.log('✅ Checkout pagado (sincrónico):', sess.id, sess.payment_status);
+      // TODO: crear/actualizar reserva, enviar emails, etc.
     }
     if (event.type === 'checkout.session.async_payment_succeeded') {
       const sess = event.data.object;
-      console.log('✅ Pago async (ej. OXXO) confirmado:', sess.id);
+      console.log('✅ Pago asíncrono confirmado (p.ej., OXXO):', sess.id);
+      // TODO: post-proceso para pagos confirmados después
     }
     if (event.type === 'checkout.session.async_payment_failed') {
       const sess = event.data.object;
-      console.log('❌ Pago async falló:', sess.id);
+      console.log('❌ Pago asíncrono falló:', sess.id);
+      // TODO: notificar al cliente/equipo si aplica
     }
     return res.json({ received: true });
   } catch (e) {
@@ -201,7 +235,7 @@ app.listen(PORT, () => {
 - Entorno: ${process.env.NODE_ENV || 'development'}
 - Stripe Key: ${process.env.STRIPE_SECRET_KEY ? 'OK' : 'FALTA'}
 - Webhook Key: ${endpointSecret ? 'OK' : 'NO CONFIGURADA'}
-- FRONTEND_URL: ${process.env.FRONTEND_URL || 'https://wefly.com.mx'}
+- FRONTEND_URL: ${FRONTEND_URL}
 Endpoints:
   GET  /                      -> Health
   POST /create-checkout-session
