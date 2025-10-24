@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
-// ===== Validaciones de entorno =====
+// === Validaciones de entorno ===
 if (!process.env.STRIPE_SECRET_KEY) {
   console.error('❌ Falta STRIPE_SECRET_KEY en .env');
   process.exit(1);
@@ -15,7 +15,7 @@ const ENABLE_OXXO = String(process.env.ENABLE_OXXO || 'true').toLowerCase() !== 
 
 const app = express();
 
-// ===== CORS =====
+// === CORS ===
 const allowedOrigins = [
   'https://wefly.com.mx',
   'https://www.wefly.com.mx',
@@ -34,13 +34,13 @@ app.use(cors({
   allowedHeaders: ['Content-Type','Authorization']
 }));
 
-// JSON para todas menos /webhook (que necesita raw)
+// JSON para todas menos /webhook (necesita raw)
 app.use((req, res, next) => {
   if (req.originalUrl === '/webhook') return next();
   return express.json()(req, res, next);
 });
 
-// ===== Precios (server-side) =====
+// === Precios (server-side) ===
 const PRICES = { adult: 2500, child: 2200 }; // MXN
 
 function computeTotalMXN(booking) {
@@ -66,12 +66,12 @@ function computeTotalMXN(booking) {
   return Math.max(0, Math.round(total));
 }
 
-// ===== Health =====
+// === Health ===
 app.get('/', (_req, res) => {
   res.json({ ok: true, service: 'WEFly Stripe Checkout', when: new Date().toISOString() });
 });
 
-// ===== Helpers de validación y formato =====
+// === Helpers ===
 function buildProductTexts(booking) {
   const contact = booking.contact || {};
   const pasajeros = Array.isArray(booking.passengers) ? booking.passengers : [];
@@ -99,7 +99,7 @@ function buildProductTexts(booking) {
     `Cliente: ${contact.name || 'No proporcionado'} ` +
     `(${contact.email || 'Sin correo'}, ${contact.phone || 'Sin teléfono'}).`;
 
-  return { contact, pasajeros, adultos, ninos, productName, passengerDetailsText, fechaVueloTxt, descripcionCompleta };
+  return { contact, pasajeros, adultos, ninos, productName, fechaVueloTxt, descripcionCompleta };
 }
 
 function sanitizeStripeError(err) {
@@ -114,29 +114,25 @@ function sanitizeStripeError(err) {
   return base;
 }
 
-// ===== Crear sesión de Stripe Checkout =====
+// === Crear sesión de Stripe Checkout ===
 app.post('/create-checkout-session', async (req, res) => {
   try {
     const booking = req.body || {};
 
     // Recalcular total en servidor
     const amountMXN = computeTotalMXN(booking);
-    if (amountMXN <= 0) {
-      return res.status(400).json({ error: 'Total inválido.' });
-    }
+    if (amountMXN <= 0) return res.status(400).json({ error: 'Total inválido.' });
 
     const { contact, pasajeros, adultos, ninos, productName, fechaVueloTxt, descripcionCompleta } = buildProductTexts(booking);
 
     // Validaciones clave
     const pax = (Number(booking.adults)||0) + (Number(booking.children)||0);
-    if (pax <= 0) {
-      return res.status(400).json({ error: 'Debes seleccionar al menos un pasajero.' });
-    }
+    if (pax <= 0) return res.status(400).json({ error: 'Debes seleccionar al menos un pasajero.' });
     if (contact.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact.email)) {
       return res.status(400).json({ error: 'Email de contacto inválido.' });
     }
 
-    // Métodos de pago (fallback si OXXO no disponible)
+    // Métodos de pago (con fallback de OXXO)
     const pmTypesBase = ['card'];
     if (ENABLE_OXXO) pmTypesBase.push('oxxo');
 
@@ -174,10 +170,11 @@ app.post('/create-checkout-session', async (req, res) => {
         payment_method_types: paymentMethodTypes,
         payment_method_options: paymentMethodTypes.includes('oxxo') ? { oxxo: { expires_after_days: 2 } } : undefined,
 
-        // Recibo por correo & descripción en el cobro
+        // Recibo por correo & descripción en el cargo (PaymentIntent)
         payment_intent_data: {
           receipt_email: contact.email || undefined,
-          description: descripcionCompleta.slice(0, 500),
+          description: descripcionCompleta.slice(0, 500), // ✅ visible en recibo
+          statement_descriptor: 'WEFLY GLOBO',            // ✅ descriptor bancario (<=22 chars)
           metadata: {
             descripcionCompleta,
             nombreCliente: contact.name || 'No proporcionado',
@@ -198,7 +195,7 @@ app.post('/create-checkout-session', async (req, res) => {
         invoice_creation: {
           enabled: true,
           invoice_data: {
-            description: descripcionCompleta, // aparece en PDF/correo de factura
+            description: descripcionCompleta,
             metadata: {
               descripcionCompleta,
               nombreCliente: contact.name || 'No proporcionado',
@@ -222,11 +219,7 @@ app.post('/create-checkout-session', async (req, res) => {
         success_url: `${FRONTEND_URL}/?checkout=success`,
         cancel_url: `${FRONTEND_URL}/?checkout=cancel`,
 
-        // Visibles en el panel
-        description: descripcionCompleta,
-        statement_descriptor_suffix: 'WEFLY GLOBO',
-
-        // Metadatos a nivel sesión
+        // Metadatos a nivel sesión (para búsqueda en panel)
         metadata: {
           descripcionCompleta,
           nombreCliente: contact.name || 'No proporcionado',
@@ -269,7 +262,7 @@ app.post('/create-checkout-session', async (req, res) => {
   }
 });
 
-// ===== Webhook (opcional, recomendado) =====
+// === Webhook (opcional, recomendado) ===
 app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
   if (!endpointSecret) {
     console.warn('⚠️ Webhook sin verificar (falta STRIPE_WEBHOOK_SECRET). Respondiendo 200 para pruebas.');
@@ -302,7 +295,7 @@ app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
   }
 });
 
-// ===== Errores globales =====
+// === Errores globales ===
 app.use((err, req, res, next) => {
   if (err && err.message && err.message.includes('Origen no permitido por CORS')) {
     return res.status(403).json({ error: 'Acceso denegado.' });
@@ -311,7 +304,7 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Error interno del servidor.' });
 });
 
-// ===== Inicio =====
+// === Inicio ===
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => {
   console.log(`
