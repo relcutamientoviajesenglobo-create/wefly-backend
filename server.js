@@ -9,8 +9,10 @@ if (!process.env.STRIPE_SECRET_KEY) {
   process.exit(1);
 }
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET || null;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://wefly.com.mx';
+const ENABLE_OXXO = String(process.env.ENABLE_OXXO || 'true').toLowerCase() !== 'false'; // true por defecto
 
 const app = express();
 
@@ -52,8 +54,9 @@ function computeTotalMXN(booking) {
   let addonsTotal = 0;
   const addons = Array.isArray(booking.addons) ? booking.addons : [];
   for (const a of addons) {
-    const name = String(a.name || a).trim();
-    const price = Number(a.price) || 0;
+    const name = String(a?.name || a || '').trim();
+    const price = Number(a?.price) || 0;
+    if (!name) continue;
     if (name === 'Desayuno en La Cueva') {
       addonsTotal += price * pax; // p/p
     } else {
@@ -69,20 +72,63 @@ app.get('/', (_req, res) => {
   res.json({ ok: true, service: 'WEFly Stripe Checkout', when: new Date().toISOString() });
 });
 
+// ===== Helpers de validación y formato =====
+function buildProductTexts(booking) {
+  const contact = booking.contact || {};
+  const pasajeros = Array.isArray(booking.passengers) ? booking.passengers : [];
+  const adultos = Number(booking.adults) || 0;
+  const ninos   = Number(booking.children) || 0;
+
+  const textoAdultos = adultos === 1 ? '1 Adulto' : `${adultos} Adultos`;
+  const textoNinos   = ninos   === 1 ? '1 Niño'   : `${ninos} Niños`;
+
+  const addonsLabel = Array.isArray(booking.addons) && booking.addons.length
+    ? ' + ' + booking.addons.map(a => (a.name || a)).join(' y ')
+    : '';
+
+  const productName = `Vuelo en Globo (${textoAdultos}, ${textoNinos})${addonsLabel}`;
+
+  const passengerDetailsText = pasajeros.length
+    ? pasajeros.map((p, i) => `Pasajero ${i + 1}: ${p.name || 'Sin nombre'} (${p.weight || 'Sin peso'} kg)`).join('; ')
+    : 'Sin información de pasajeros';
+
+  const fechaVueloTxt = booking.date ? String(booking.date) : 'No especificada';
+
+  const descripcionCompleta =
+    `${productName}. ${passengerDetailsText}. ` +
+    `Fecha de vuelo: ${fechaVueloTxt}. ` +
+    `Cliente: ${contact.name || 'No proporcionado'} ` +
+    `(${contact.email || 'Sin correo'}, ${contact.phone || 'Sin teléfono'}).`;
+
+  return { contact, pasajeros, adultos, ninos, productName, passengerDetailsText, fechaVueloTxt, descripcionCompleta };
+}
+
+function sanitizeStripeError(err) {
+  // Devuelve mensaje entendible al front (sin datos sensibles)
+  const base = err?.raw?.message || err.message || 'Error al crear sesión de pago.';
+  const code = err?.raw?.code || err.code || '';
+  // Mensajes más claros para casos comunes:
+  if (code === 'payment_method_type_unavailable' || base.toLowerCase().includes('payment_method_types') && base.toLowerCase().includes('oxxo')) {
+    return 'Tu cuenta de Stripe no tiene OXXO habilitado o este método no está disponible. Pagos con tarjeta siguen disponibles.';
+  }
+  if (base.toLowerCase().includes('invalid email')) return 'Email de contacto inválido.';
+  if (base.toLowerCase().includes('amount')) return 'Monto inválido para crear el pago.';
+  return base;
+}
+
 // ===== Crear sesión de Stripe Checkout =====
 app.post('/create-checkout-session', async (req, res) => {
   try {
     const booking = req.body || {};
-    const contact = booking.contact || {};
-    const pasajeros = Array.isArray(booking.passengers) ? booking.passengers : [];
+    const { contact } = buildProductTexts(booking);
 
-    // Recalcular total seguro
+    // Recalcular total en servidor
     const amountMXN = computeTotalMXN(booking);
     if (amountMXN <= 0) {
       return res.status(400).json({ error: 'Total inválido.' });
     }
 
-    // Validaciones básicas
+    // Validaciones
     const pax = (Number(booking.adults)||0) + (Number(booking.children)||0);
     if (pax <= 0) {
       return res.status(400).json({ error: 'Debes seleccionar al menos un pasajero.' });
@@ -91,96 +137,86 @@ app.post('/create-checkout-session', async (req, res) => {
       return res.status(400).json({ error: 'Email de contacto inválido.' });
     }
 
-    // ===== Construcción del nombre/descripcion (completo y plural) =====
-    const adultos = Number(booking.adults) || 0;
-    const ninos   = Number(booking.children) || 0;
+    const { pasajeros, adultos, ninos, productName, fechaVueloTxt, descripcionCompleta } = buildProductTexts(booking);
 
-    const textoAdultos = adultos === 1 ? '1 Adulto' : `${adultos} Adultos`;
-    const textoNinos   = ninos   === 1 ? '1 Niño'   : `${ninos} Niños`;
+    // Conjunto de métodos de pago (intentamos incluir OXXO si está habilitado)
+    const pmTypesBase = ['card'];
+    if (ENABLE_OXXO) pmTypesBase.push('oxxo');
 
-    const addonsLabel = Array.isArray(booking.addons) && booking.addons.length
-      ? ' + ' + booking.addons.map(a => (a.name || a)).join(' y ')
-      : '';
-
-    const productName = `Vuelo en Globo (${textoAdultos}, ${textoNinos})${addonsLabel}`;
-
-    const passengerDetailsText = pasajeros.length
-      ? pasajeros.map((p, i) => `Pasajero ${i + 1}: ${p.name || 'Sin nombre'} (${p.weight || 'Sin peso'} kg)`).join('; ')
-      : 'Sin información de pasajeros';
-
-    const fechaVueloTxt = booking.date ? String(booking.date) : 'No especificada';
-
-    const descripcionCompleta =
-      `${productName}. ${passengerDetailsText}. ` +
-      `Fecha de vuelo: ${fechaVueloTxt}. ` +
-      `Cliente: ${contact.name || 'No proporcionado'} ` +
-      `(${contact.email || 'Sin correo'}, ${contact.phone || 'Sin teléfono'}).`;
-
-    // ===== Crear sesión de Checkout =====
-    const session = await stripe.checkout.sessions.create({
-      mode: 'payment',
-      locale: 'es',
-      currency: 'mxn',
-      line_items: [{
-        quantity: 1,
-        price_data: {
-          currency: 'mxn',
-          unit_amount: amountMXN * 100, // centavos
-          product_data: {
-            name: productName,
-            description: descripcionCompleta.slice(0, 500), // límite aproximado
-            metadata: {
-              tipoProducto: 'Vuelo en Globo',
-              adultos: String(adultos),
-              ninos: String(ninos),
-              addonsSeleccionados: JSON.stringify((booking.addons || []).map(a => a.name || a)),
-              fechaVuelo: fechaVueloTxt,
-              pasajeros: JSON.stringify(pasajeros), // Nombre + Peso
-              totalServidorMXN: String(amountMXN)
+    async function createSession(paymentMethodTypes) {
+      return await stripe.checkout.sessions.create({
+        mode: 'payment',
+        locale: 'es',
+        currency: 'mxn',
+        line_items: [{
+          quantity: 1,
+          price_data: {
+            currency: 'mxn',
+            unit_amount: amountMXN * 100, // centavos
+            product_data: {
+              name: productName,
+              description: descripcionCompleta.slice(0, 500),
+              metadata: {
+                tipoProducto: 'Vuelo en Globo',
+                adultos: String(adultos),
+                ninos: String(ninos),
+                addonsSeleccionados: JSON.stringify((booking.addons || []).map(a => a.name || a)),
+                fechaVuelo: fechaVueloTxt,
+                pasajeros: JSON.stringify(pasajeros),
+                totalServidorMXN: String(amountMXN)
+              }
             }
           }
+        }],
+        allow_promotion_codes: false,
+        billing_address_collection: 'auto',
+        phone_number_collection: { enabled: true },
+        payment_method_types: paymentMethodTypes,
+        payment_method_options: paymentMethodTypes.includes('oxxo') ? { oxxo: { expires_after_days: 2 } } : undefined,
+        customer_email: contact.email || undefined,
+        success_url: `${FRONTEND_URL}/?checkout=success`,
+        cancel_url: `${FRONTEND_URL}/?checkout=cancel`,
+        description: descripcionCompleta,
+        statement_descriptor_suffix: 'WEFLY GLOBO',
+        metadata: {
+          descripcionCompleta,
+          nombreCliente: contact.name || 'No proporcionado',
+          emailCliente: contact.email || 'No proporcionado',
+          telefonoCliente: contact.phone || 'No proporcionado',
+          fechaVuelo: fechaVueloTxt,
+          adultos: String(adultos),
+          ninos: String(ninos),
+          pasajeros: JSON.stringify(pasajeros),
+          addons: JSON.stringify((booking.addons || []).map(a => a.name || a)),
+          totalServidorMXN: String(amountMXN)
         }
-      }],
-      allow_promotion_codes: false,
-      billing_address_collection: 'auto',
-      phone_number_collection: { enabled: true },
+      });
+    }
 
-      // Apple/Google Pay entran por "card"; OXXO explícito
-      payment_method_types: ['card', 'oxxo'],
-      payment_method_options: {
-        oxxo: { expires_after_days: 2 }
-      },
+    let session;
+    try {
+      session = await createSession(pmTypesBase);
+    } catch (e) {
+      // Si falla por OXXO no disponible, reintenta solo con tarjeta
+      const msg = sanitizeStripeError(e);
+      const oxxoUnavailable =
+        (e?.raw?.code === 'payment_method_type_unavailable') ||
+        (String(e?.message || '').toLowerCase().includes('payment_method_types') &&
+         String(e?.message || '').toLowerCase().includes('oxxo'));
 
-      // Branding del Checkout: se controla en Dashboard > Settings > Branding
-      // (Checkout no admite logo por sesión; es a nivel cuenta)
-
-      customer_email: contact.email || undefined,
-      success_url: `${FRONTEND_URL}/?checkout=success`,
-      cancel_url: `${FRONTEND_URL}/?checkout=cancel`,
-
-      // campos “altamente visibles” en Stripe
-      description: descripcionCompleta,
-      statement_descriptor_suffix: 'WEFLY GLOBO',
-
-      // metadatos adicionales (nivel sesión)
-      metadata: {
-        descripcionCompleta,
-        nombreCliente: contact.name || 'No proporcionado',
-        emailCliente: contact.email || 'No proporcionado',
-        telefonoCliente: contact.phone || 'No proporcionado',
-        fechaVuelo: fechaVueloTxt,
-        adultos: String(adultos),
-        ninos: String(ninos),
-        pasajeros: JSON.stringify(pasajeros),
-        addons: JSON.stringify((booking.addons || []).map(a => a.name || a)),
-        totalServidorMXN: String(amountMXN)
+      if (oxxoUnavailable && pmTypesBase.includes('oxxo')) {
+        console.warn('⚠️ OXXO no disponible. Reintentando solo con tarjeta…');
+        session = await createSession(['card']);
+      } else {
+        console.error('❌ Error create-checkout-session:', e);
+        return res.status(500).json({ error: msg });
       }
-    });
+    }
 
     return res.json({ id: session.id, url: session.url });
   } catch (err) {
-    console.error('❌ Error create-checkout-session:', err);
-    return res.status(500).json({ error: 'No se pudo crear la sesión de pago.' });
+    console.error('❌ Error create-checkout-session (catch):', err);
+    return res.status(500).json({ error: sanitizeStripeError(err) });
   }
 });
 
@@ -203,12 +239,12 @@ app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
     if (event.type === 'checkout.session.async_payment_succeeded') {
       const sess = event.data.object;
       console.log('✅ Pago asíncrono confirmado (p.ej., OXXO):', sess.id);
-      // TODO: post-proceso para pagos confirmados después
+      // TODO
     }
     if (event.type === 'checkout.session.async_payment_failed') {
       const sess = event.data.object;
       console.log('❌ Pago asíncrono falló:', sess.id);
-      // TODO: notificar al cliente/equipo si aplica
+      // TODO
     }
     return res.json({ received: true });
   } catch (e) {
@@ -236,6 +272,7 @@ app.listen(PORT, () => {
 - Stripe Key: ${process.env.STRIPE_SECRET_KEY ? 'OK' : 'FALTA'}
 - Webhook Key: ${endpointSecret ? 'OK' : 'NO CONFIGURADA'}
 - FRONTEND_URL: ${FRONTEND_URL}
+- ENABLE_OXXO: ${ENABLE_OXXO}
 Endpoints:
   GET  /                      -> Health
   POST /create-checkout-session
