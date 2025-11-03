@@ -1,61 +1,66 @@
 /**
- * server.js — We Fly Teotihuacán
+ * server.js — FINAL
+ * We Fly Teotihuacán
  * - Stripe Checkout (create-checkout-session)
- * - Webhook firmado (checkout.session.completed) -> envía email con SendGrid
+ * - Webhook firmado (checkout.session.completed) -> SendGrid
  * - Generación de código de confirmación (WFT-YYYYMMDD-XXXXXX)
- * - Endpoint para consultar por session_id (mostrar confirmation_code en UI)
- * - Endpoint de verificación por QR: /verify/:code (busca PI por metadata)
- * - CORS, robots.txt, status, security.txt y logs
+ * - Guarda en Supabase la reserva (pending -> paid)
+ * - Endpoint /booking/by-session/:sessionId (para mostrar el código en el front)
+ * - Endpoint /verify-ticket?code=... (para tu staff / móvil día de vuelo)
+ * - CORS y health
  */
 
 require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
-const os = require('os');
-const bodyParser = require('body-parser'); // raw para webhook
+const bodyParser = require('body-parser'); // para webhook raw
 const { customAlphabet } = require('nanoid');
 const sgMail = require('@sendgrid/mail');
-
-if (!process.env.STRIPE_SECRET_KEY) {
-  console.error('❌ Falta STRIPE_SECRET_KEY');
-  process.exit(1);
-}
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
+// Supabase client (versión simple con fetch)
+const { createClient } = require('@supabase/supabase-js');
+
+// ====== CONFIG ======
 const app = express();
 const PORT = process.env.PORT || 3000;
-const START_TIME = Date.now();
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://wefly.com.mx';
+const QR_SIGNING_SECRET = process.env.QR_SIGNING_SECRET || 'change-this';
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// ====== SendGrid ======
-if (!process.env.SENDGRID_API_KEY) {
-  console.warn('⚠️  Falta SENDGRID_API_KEY en variables de entorno');
+// Supabase client con service role (solo en el server)
+const supabase =
+  SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    : null;
+
+// SendGrid
+if (process.env.SENDGRID_API_KEY) {
+  sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+} else {
+  console.warn('⚠️ Falta SENDGRID_API_KEY en .env');
 }
-sgMail.setApiKey(process.env.SENDGRID_API_KEY || '');
 
-// ====== CORS ======
+// CORS
 const allowedOrigins = [
   'https://wefly.com.mx',
   'https://www.wefly.com.mx',
   'https://vuelosenglobo.mx',
-  'https://www.vuelosenglobo.mx',
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'http://localhost:5500',
-  'http://127.0.0.1:5500',
+  'https://wefly.com.mx:443',
+  // agrega más si los usas
 ];
 app.use(
   cors({
     origin(origin, cb) {
-      if (!origin || allowedOrigins.includes(origin)) cb(null, true);
-      else cb(new Error(`CORS bloqueado para origen: ${origin}`), false);
+      if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(new Error('CORS bloqueado para origen: ' + origin));
     },
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
   })
 );
 
-// ====== Webhook (RAW) ======
+// WEBHOOK necesita RAW
 app.post(
   '/stripe-webhook',
   bodyParser.raw({ type: 'application/json' }),
@@ -77,11 +82,8 @@ app.post(
       if (event.type === 'checkout.session.completed') {
         const session = event.data.object;
 
-        // Metadata que enviamos al crear la sesión
         const bookingId = session.metadata?.bookingId;
         const confirmationCode = session.metadata?.confirmation_code;
-
-        // Datos del cliente
         const customer_email =
           session.customer_details?.email ||
           session.metadata?.customer_email ||
@@ -100,62 +102,97 @@ app.post(
               day: 'numeric',
             })
           : 'Por confirmar';
-
         const totalMXN =
           typeof session.amount_total === 'number'
             ? session.amount_total / 100
             : undefined;
 
-        let services = 'Vuelo en Globo';
-
-        // Enviar correo al cliente
-        if (process.env.SENDGRID_TEMPLATE_ID && customer_email) {
-          await sendBookingEmail({
-            to: customer_email,
-            templateId: process.env.SENDGRID_TEMPLATE_ID,
-            dynamicData: {
-              customer_name,
-              confirmation_code: confirmationCode,
-              date: dateStr,
-              pax: String(pax),
-              total_formatted:
-                totalMXN !== undefined
-                  ? `$${Number(totalMXN).toLocaleString('es-MX')} MXN`
-                  : '',
-              services,
-            },
-            from: 'We Fly Teotihuacan <info@wefly.com.mx>',
-          });
-        } else {
-          console.warn(
-            '⚠️  Falta SENDGRID_TEMPLATE_ID o email del cliente para enviar correo.'
-          );
+        // 1) Guarda en Supabase como "paid"
+        if (supabase && bookingId) {
+          const flightDate =
+            dateISO && dateISO.length >= 10 ? dateISO.slice(0, 10) : null;
+          await supabase
+            .from('bookings')
+            .upsert(
+              {
+                booking_id: bookingId,
+                confirmation_code: confirmationCode,
+                stripe_session_id: session.id,
+                customer_name,
+                customer_email,
+                customer_phone: session.metadata?.customer_phone || '',
+                pax: Number(pax) || 0,
+                flight_date: flightDate,
+                total_mxn: totalMXN || null,
+                status: 'paid',
+              },
+              { onConflict: 'booking_id' }
+            )
+            .then(({ error }) => {
+              if (error) {
+                console.error('❌ Supabase upsert (webhook):', error);
+              }
+            });
         }
 
-        // Copia interna al staff
+        // 2) Enviar correo al cliente
+        const services = 'Vuelo en Globo We Fly Teotihuacan';
+        if (
+          process.env.SENDGRID_TEMPLATE_ID &&
+          process.env.SENDGRID_API_KEY &&
+          customer_email
+        ) {
+          try {
+            await sgMail.send({
+              to: customer_email,
+              from: 'We Fly Teotihuacan <info@wefly.com.mx>',
+              templateId: process.env.SENDGRID_TEMPLATE_ID,
+              dynamic_template_data: {
+                customer_name,
+                confirmation_code: confirmationCode,
+                date: dateStr,
+                pax: String(pax),
+                total_formatted:
+                  totalMXN !== undefined
+                    ? `$${Number(totalMXN).toLocaleString('es-MX')} MXN`
+                    : '',
+                services,
+                maps_text: 'We Fly Teotihuacan',
+              },
+            });
+          } catch (e) {
+            console.error('❌ Error enviando email cliente:', e);
+          }
+        }
+
+        // 3) Copia interna
         const staffInbox =
-          process.env.BOOKINGS_INBOX || 'info@wefly.com.mx'; // fallback
+          process.env.BOOKINGS_INBOX || 'info@wefly.com.mx';
         const staffTpl =
           process.env.SENDGRID_TEMPLATE_ID_STAFF ||
           process.env.SENDGRID_TEMPLATE_ID;
-
-        if (staffTpl && staffInbox) {
-          await sendBookingEmail({
-            to: staffInbox,
-            templateId: staffTpl,
-            dynamicData: {
-              customer_name,
-              confirmation_code: confirmationCode,
-              date: dateStr,
-              pax: String(pax),
-              total_formatted:
-                totalMXN !== undefined
-                  ? `$${Number(totalMXN).toLocaleString('es-MX')} MXN`
-                  : '',
-              services,
-            },
-            from: 'Reservas We Fly <info@wefly.com.mx>',
-          });
+        if (staffTpl && staffInbox && process.env.SENDGRID_API_KEY) {
+          try {
+            await sgMail.send({
+              to: staffInbox,
+              from: 'Reservas We Fly <info@wefly.com.mx>',
+              templateId: staffTpl,
+              dynamic_template_data: {
+                customer_name,
+                confirmation_code: confirmationCode,
+                date: dateStr,
+                pax: String(pax),
+                total_formatted:
+                  totalMXN !== undefined
+                    ? `$${Number(totalMXN).toLocaleString('es-MX')} MXN`
+                    : '',
+                services,
+                maps_text: 'We Fly Teotihuacan',
+              },
+            });
+          } catch (e) {
+            console.error('❌ Error enviando email staff:', e);
+          }
         }
       }
 
@@ -167,13 +204,12 @@ app.post(
   }
 );
 
-// ====== JSON parser para el resto ======
+// Después del webhook, JSON normal
 app.use(express.json());
 
 // ====== UTILS ======
-const PRICES = { adult: 2500, child: 2200 };
 
-// Genera código: WFT-YYYYMMDD-XXXXXX (sin O/0, I/1, etc.)
+// nanoid para códigos sin confusión
 const nano = customAlphabet('ABCDEFGHJKMNPQRSTUVWXYZ23456789', 6);
 function buildConfirmationCode(date = new Date()) {
   const y = date.getFullYear();
@@ -182,34 +218,25 @@ function buildConfirmationCode(date = new Date()) {
   return `WFT-${y}${m}${d}-${nano()}`;
 }
 
+// total como en el front
+const PRICES = { adult: 2500, child: 2200 };
 function computeTotalMXN(booking) {
   const adults = Number(booking.adults) || 0;
   const children = Number(booking.children) || 0;
   const base = adults * PRICES.adult + children * PRICES.child;
   const pax = adults + children;
-
   let addonsTotal = 0;
   (booking.addons || []).forEach((a) => {
     const price = Number(a.price) || 0;
     addonsTotal += a.name === 'Desayuno en La Cueva' ? price * pax : price;
   });
-
   return base + addonsTotal;
 }
 
-async function sendBookingEmail({ to, templateId, dynamicData, from }) {
-  if (!process.env.SENDGRID_API_KEY || !templateId || !to) return;
-  const msg = {
-    to,
-    from: from || 'We Fly Teotihuacan <info@wefly.com.mx>',
-    templateId,
-    dynamic_template_data: dynamicData,
-  };
-  await sgMail.send(msg);
-}
+// ====== RUTAS ======
 
-// ====== Health / Warm-up ======
-app.get('/', (req, res) => {
+// health
+app.get('/', (_req, res) => {
   res.json({
     ok: true,
     service: 'WeFly Stripe Server',
@@ -217,18 +244,19 @@ app.get('/', (req, res) => {
   });
 });
 
-// ====== Crear sesión de checkout ======
+app.get('/status', (_req, res) => {
+  res.send('<h1>We Fly Teotihuacan — Stripe Server OK ✅</h1>');
+});
+
+// crear sesión checkout
 app.post('/create-checkout-session', async (req, res) => {
   try {
     const booking = req.body || {};
-
-    // Validaciones
     const adults = Number(booking.adults) || 0;
     const children = Number(booking.children) || 0;
+
     if (adults + children <= 0) {
-      return res
-        .status(400)
-        .json({ error: 'Debes seleccionar al menos 1 pasajero.' });
+      return res.status(400).json({ error: 'Debes seleccionar al menos 1 pasajero.' });
     }
 
     const totalMXN = computeTotalMXN(booking);
@@ -236,12 +264,11 @@ app.post('/create-checkout-session', async (req, res) => {
       return res.status(400).json({ error: 'Total inválido.' });
     }
 
-    // IDs y confirmación
     const bookingId = `BKG_${Date.now()}`;
     const confDate = booking?.date ? new Date(booking.date) : new Date();
     const confirmationCode = buildConfirmationCode(confDate);
 
-    // Sesión de Stripe
+    // crear sesión stripe
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       currency: 'mxn',
@@ -249,13 +276,14 @@ app.post('/create-checkout-session', async (req, res) => {
         {
           price_data: {
             currency: 'mxn',
-            product_data: { name: 'Vuelo en Globo + Adicionales' },
+            product_data: {
+              name: 'Vuelo en Globo We Fly Teotihuacan',
+            },
             unit_amount: Math.round(totalMXN * 100),
           },
           quantity: 1,
         },
       ],
-      // metadata en la sesión
       metadata: {
         bookingId,
         confirmation_code: confirmationCode,
@@ -264,35 +292,48 @@ app.post('/create-checkout-session', async (req, res) => {
         customer_phone: booking?.contact?.phone || '',
         pax: String(adults + children),
         date: booking?.date ? String(booking.date) : '',
-        brand: 'We Fly Teotihuacan',
-      },
-      // también en el PaymentIntent (para poder verificar por QR)
-      payment_intent_data: {
-        description: `Reserva We Fly Teotihuacan — ${confirmationCode}`,
-        metadata: {
-          bookingId,
-          confirmation_code: confirmationCode,
-          pax: String(adults + children),
-          date: booking?.date ? String(booking.date) : '',
-          brand: 'We Fly Teotihuacan',
-        },
       },
       client_reference_id: bookingId,
-      success_url:
-        'https://wefly.com.mx/?checkout=success&bid={CHECKOUT_SESSION_ID}',
-      cancel_url: 'https://wefly.com.mx/?checkout=cancel',
+      success_url: `${FRONTEND_URL}/?checkout=success&bid={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${FRONTEND_URL}/?checkout=cancel`,
+      payment_method_types: ['card', 'oxxo', 'paypal'],
+      payment_method_options: {
+        oxxo: { expires_after_days: 2 },
+      },
     });
+
+    // guardamos ya en Supabase como pending
+    if (supabase) {
+      const flightDate =
+        booking?.date && booking.date.length >= 10
+          ? booking.date.slice(0, 10)
+          : null;
+
+      const { error } = await supabase.from('bookings').insert({
+        booking_id: bookingId,
+        confirmation_code: confirmationCode,
+        stripe_session_id: session.id,
+        customer_name: booking?.contact?.name || '',
+        customer_email: booking?.contact?.email || '',
+        customer_phone: booking?.contact?.phone || '',
+        pax: adults + children,
+        flight_date: flightDate,
+        total_mxn: totalMXN,
+        status: 'pending',
+      });
+      if (error) {
+        console.error('❌ Supabase insert (create-checkout-session):', error);
+      }
+    }
 
     res.json({ url: session.url, bookingId });
   } catch (err) {
     console.error('❌ Error creando sesión:', err);
-    res
-      .status(400)
-      .json({ error: err.message || 'No se pudo crear la sesión.' });
+    res.status(400).json({ error: err.message || 'No se pudo crear la sesión.' });
   }
 });
 
-// ====== Consultar por sessionId (mostrar confirmation_code en UI) ======
+// consultar por sessionId (para mostrar el código en UI)
 app.get('/booking/by-session/:sessionId', async (req, res) => {
   try {
     const { sessionId } = req.params;
@@ -315,7 +356,7 @@ app.get('/booking/by-session/:sessionId', async (req, res) => {
       date: dateISO,
       totalMXN,
       status: session.payment_status,
-      brand: session.metadata?.brand || 'We Fly Teotihuacan',
+      brand: 'We Fly Teotihuacan',
     });
   } catch (e) {
     console.error('❌ Error consultando sesión:', e);
@@ -323,169 +364,100 @@ app.get('/booking/by-session/:sessionId', async (req, res) => {
   }
 });
 
-// ====== Verificación por QR ======
-// Busca PaymentIntents por metadata['confirmation_code'] usando el Search API
-app.get('/verify/:code', async (req, res) => {
+// verify-ticket (para el QR)
+app.get('/verify-ticket', async (req, res) => {
   try {
-    const code = req.params.code;
-    // Busca el PaymentIntent por metadata.confirmation_code
-    let piFound = null;
-
-    try {
-      const search = await stripe.paymentIntents.search({
-        query: `metadata['confirmation_code']:'${code}'`,
-        limit: 1,
-      });
-      if (search?.data?.length) piFound = search.data[0];
-    } catch (err) {
-      console.warn('Search API no disponible para PaymentIntents:', err.message);
+    const code = (req.query.code || '').trim();
+    if (!code) {
+      return res.status(400).send('<h1>400 — Falta el código</h1>');
     }
 
-    if (!piFound) {
-      // Fallback: 404
-      res.status(404).send(`
-        <!doctype html><meta charset="utf-8">
-        <title>Verificación — We Fly Teotihuacan</title>
-        <style>body{font-family:ui-sans-serif; background:#0f172a; color:#e5e7eb; padding:24px} .card{max-width:700px;margin:0 auto;background:#111827;border:1px solid #1f2937;border-radius:16px;padding:24px}</style>
-        <div class="card">
-          <h1>Verificación</h1>
-          <p>No encontramos la confirmación <strong>${code}</strong>.</p>
-          <p>Si crees que es un error, muestra tu correo de confirmación de <b>We Fly Teotihuacan</b>.</p>
-        </div>
-      `);
-      return;
+    // buscar en Supabase
+    if (!supabase) {
+      return res.status(500).send('<h1>500 — Supabase no configurado</h1>');
     }
 
-    const paid =
-      piFound.status === 'succeeded' || piFound.status === 'requires_capture';
-    const bookingId = piFound.metadata?.bookingId || '—';
-    const pax = piFound.metadata?.pax || '—';
-    const dateISO = piFound.metadata?.date || '';
-    const dateStr = dateISO
-      ? new Date(dateISO).toLocaleDateString('es-MX', {
-          weekday: 'short',
-          year: 'numeric',
-          month: 'short',
-          day: 'numeric',
-        })
-      : 'Por confirmar';
-    const brand = piFound.metadata?.brand || 'We Fly Teotihuacan';
+    const { data, error } = await supabase
+      .from('bookings')
+      .select('*')
+      .eq('confirmation_code', code)
+      .maybeSingle();
+
+    if (error) {
+      console.error('❌ Supabase error /verify-ticket:', error);
+      return res.status(500).send('<h1>500 — Error al consultar</h1>');
+    }
+
+    if (!data) {
+      return res
+        .status(404)
+        .send(
+          `<html><body style="font-family:system-ui;background:#fee2e2;padding:2rem;"><h1 style="color:#b91c1c;">❌ Código no encontrado</h1><p>Revisa que el código sea correcto.</p></body></html>`
+        );
+    }
+
+    const isToday =
+      data.flight_date &&
+      data.flight_date.toString() ===
+        new Date().toISOString().slice(0, 10).toString();
+
+    const okColor = '#0f766e';
+    const warnColor = '#b45309';
+    const bg = isToday ? '#ecfdf3' : '#fef9c3';
+    const color = isToday ? okColor : warnColor;
+    const status = data.status;
+
+    // actualizar a checked_in si venimos del QR (opcional)
+    if (status === 'paid') {
+      await supabase
+        .from('bookings')
+        .update({ status: 'checked_in' })
+        .eq('id', data.id);
+    }
 
     res.send(`
-      <!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-      <title>Verificación — ${brand}</title>
-      <style>
-        body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Inter,Roboto,Arial;background:#0f172a;color:#e5e7eb;margin:0;padding:24px}
-        .card{max-width:720px;margin:0 auto;background:#111827;border:1px solid #1f2937;border-radius:16px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,.4)}
-        .ok{color:#22c55e;font-weight:700}
-        .bad{color:#ef4444;font-weight:700}
-        .row{display:flex;justify-content:space-between;border-top:1px dashed #374151;padding:10px 0}
-      </style>
-      <div class="card">
-        <h1>Verificación de Reserva — ${brand}</h1>
-        <div class="row"><span>Código</span><span>${code}</span></div>
-        <div class="row"><span>Booking ID</span><span>${bookingId}</span></div>
-        <div class="row"><span>Pax</span><span>${pax}</span></div>
-        <div class="row"><span>Fecha</span><span>${dateStr}</span></div>
-        <div class="row"><span>Estado de pago</span><span class="${paid ? 'ok' : 'bad'}">${paid ? 'PAGADO' : 'NO PAGADO'}</span></div>
-        <p style="margin-top:16px;color:#9ca3af">Marca: ${brand}</p>
-      </div>
+      <html>
+        <head>
+          <meta charset="UTF-8" />
+          <title>We Fly Teotihuacan - Verificación</title>
+          <meta name="viewport" content="width=device-width,initial-scale=1" />
+        </head>
+        <body style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:${bg}; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:1.5rem;">
+          <div style="background:white; border-radius:1.5rem; padding:1.5rem 1.75rem; width:100%; max-width:420px; box-shadow:0 20px 40px rgba(15,23,42,0.15); text-align:center;">
+            <img src="https://wefly.com.mx/assets/images/logo20we20fly-256x256.webp" alt="We Fly Teotihuacan" style="width:72px;height:72px;object-fit:contain;margin:0 auto 1rem;border-radius:9999px;background:#1a72f6;padding:6px;" />
+            <p style="font-size:.75rem; color:#94a3b8; letter-spacing:.06em; text-transform:uppercase;">We Fly Teotihuacan • Check-in</p>
+            <h1 style="font-size:1.5rem; font-weight:700; margin-top:.25rem; margin-bottom:1rem; color:${color};">Código válido ✅</h1>
+            <p style="font-size:.875rem; color:#475569; margin-bottom:1rem;">${data.customer_name || 'Pasajero'} — ${data.customer_email || ''}</p>
+            <div style="background:#f8fafc; border-radius:1.25rem; padding:1rem; margin-bottom:1rem; border:1px solid rgba(148,163,184,0.25);">
+              <p style="font-size:.75rem; text-transform:uppercase; color:#94a3b8; margin-bottom:.25rem;">Código de confirmación</p>
+              <p style="font-size:1.25rem; font-weight:800; letter-spacing:.08em; color:#0f172a;">${data.confirmation_code}</p>
+            </div>
+            <div style="display:flex; gap:.75rem; margin-bottom:1rem;">
+              <div style="flex:1; background:white; border:1px solid rgba(148,163,184,0.35); border-radius:1rem; padding:.5rem;">
+                <p style="font-size:.6rem; text-transform:uppercase; color:#94a3b8; margin:0;">Pasajeros</p>
+                <p style="font-weight:700; color:#0f172a; margin:0;">${data.pax || 0}</p>
+              </div>
+              <div style="flex:1; background:white; border:1px solid rgba(148,163,184,0.35); border-radius:1rem; padding:.5rem;">
+                <p style="font-size:.6rem; text-transform:uppercase; color:#94a3b8; margin:0;">Fecha</p>
+                <p style="font-weight:700; color:#0f172a; margin:0;">${data.flight_date || 'Por confirmar'}</p>
+              </div>
+              <div style="flex:1; background:white; border:1px solid rgba(148,163,184,0.35); border-radius:1rem; padding:.5rem;">
+                <p style="font-size:.6rem; text-transform:uppercase; color:#94a3b8; margin:0;">Estatus</p>
+                <p style="font-weight:700; color:#0f172a; margin:0;">${status}</p>
+              </div>
+            </div>
+            <p style="font-size:.75rem; color:#94a3b8;">Ubícanos en Google Maps como <strong>We Fly Teotihuacan</strong></p>
+          </div>
+        </body>
+      </html>
     `);
-  } catch (err) {
-    console.error('❌ Error /verify:', err);
-    res.status(500).send('Error de verificación.');
+  } catch (e) {
+    console.error('❌ /verify-ticket error:', e);
+    res.status(500).send('<h1>500 — Error interno</h1>');
   }
 });
 
-// ====== robots.txt ======
-app.get('/robots.txt', (_req, res) => {
-  res.type('text/plain; charset=utf-8');
-  const site = process.env.FRONTEND_URL || 'https://wefly.com.mx';
-  res.send(
-    [
-      'User-agent: *',
-      'Allow: /',
-      'Disallow: /stripe-webhook',
-      'Disallow: /booking/',
-      'Disallow: /verify/',
-      '',
-      `Sitemap: ${site.replace(/\/$/, '')}/sitemap.xml`,
-      '',
-    ].join('\n')
-  );
-});
-
-// ====== security.txt ======
-app.get(['/security.txt', '/.well-known/security.txt'], (_req, res) => {
-  res.type('text/plain; charset=utf-8');
-  res.send(
-    [
-      'Contact: mailto:info@wefly.com.mx',
-      'Policy: https://wefly.com.mx/politica-de-privacidad/',
-      'Preferred-Languages: es, en',
-      '',
-    ].join('\n')
-  );
-});
-
-// ====== status ======
-app.get('/status', (req, res) => {
-  const uptimeSec = Math.round((Date.now() - START_TIME) / 1000);
-  res.json({
-    ok: true,
-    service: 'WeFly Stripe Server',
-    version: process.env.APP_VERSION || '1.0.0',
-    node: process.version,
-    platform: `${os.platform()}-${os.arch()}`,
-    region:
-      process.env.RENDER_REGION ||
-      process.env.FLY_REGION ||
-      process.env.VERCEL_REGION ||
-      null,
-    env: process.env.NODE_ENV || 'development',
-    uptime_seconds: uptimeSec,
-    now: new Date().toISOString(),
-    health: {
-      stripe_key: !!process.env.STRIPE_SECRET_KEY,
-      webhook_secret: !!process.env.STRIPE_WEBHOOK_SECRET,
-      sendgrid_key: !!process.env.SENDGRID_API_KEY,
-      sendgrid_template: !!process.env.SENDGRID_TEMPLATE_ID,
-    },
-  });
-});
-
-app.get('/status/html', (req, res) => {
-  const uptimeSec = Math.round((Date.now() - START_TIME) / 1000);
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(`
-<!doctype html>
-<html lang="es"><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Status — We Fly Teotihuacan</title>
-<style>
-  body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial;background:#0f172a;color:#e5e7eb;margin:0;padding:24px}
-  .card{max-width:760px;margin:0 auto;background:#111827;border:1px solid #1f2937;border-radius:16px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,.4)}
-  h1{margin:0 0 8px;font-size:22px}
-  .row{display:flex;justify-content:space-between;border-top:1px dashed #374151;padding:10px 0}
-  .ok{color:#22c55e;font-weight:700}
-  .bad{color:#ef4444;font-weight:700}
-</style>
-<div class="card">
-  <h1>Status <span style="color:#9ca3af">We Fly Teotihuacan</span></h1>
-  <div class="row"><span>Versión</span><span>${process.env.APP_VERSION || '1.0.0'}</span></div>
-  <div class="row"><span>Node</span><span>${process.version}</span></div>
-  <div class="row"><span>Plataforma</span><span>${os.platform()}-${os.arch()}</span></div>
-  <div class="row"><span>Región</span><span>${process.env.RENDER_REGION || process.env.FLY_REGION || process.env.VERCEL_REGION || '—'}</span></div>
-  <div class="row"><span>Entorno</span><span>${process.env.NODE_ENV || 'development'}</span></div>
-  <div class="row"><span>Uptime</span><span>${uptimeSec}s</span></div>
-  <div class="row"><span>Stripe Key</span><span class="${process.env.STRIPE_SECRET_KEY ? 'ok' : 'bad'}">${process.env.STRIPE_SECRET_KEY ? 'OK' : 'FALTA'}</span></div>
-  <div class="row"><span>Webhook Secret</span><span class="${process.env.STRIPE_WEBHOOK_SECRET ? 'ok' : 'bad'}">${process.env.STRIPE_WEBHOOK_SECRET ? 'OK' : 'FALTA'}</span></div>
-  <div class="row"><span>SendGrid Key</span><span class="${process.env.SENDGRID_API_KEY ? 'ok' : 'bad'}">${process.env.SENDGRID_API_KEY ? 'OK' : 'FALTA'}</span></div>
-  <div class="row"><span>SendGrid Template</span><span class="${process.env.SENDGRID_TEMPLATE_ID ? 'ok' : 'bad'}">${process.env.SENDGRID_TEMPLATE_ID ? 'OK' : 'FALTA'}</span></div>
-</div>
-</html>`);
-});
-
-// ====== START ======
+// start
 app.listen(PORT, () => {
   console.log(`✅ WeFly Stripe Server arriba en puerto ${PORT}`);
 });

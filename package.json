@@ -1,39 +1,23 @@
 {
   "name": "wefly-stripe-server",
   "version": "1.0.0",
-  "description": "Servidor de Checkout Stripe + Webhook + Verificación QR + SendGrid para We Fly Teotihuacan",
+  "description": "Servidor de pagos Stripe + SendGrid + Supabase para We Fly Teotihuacan",
   "main": "server.js",
-  "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js",
-    "render-build": "echo \"no build step\"",
-    "render-start": "node server.js",
-    "check": "node -e \"console.log('Node:', process.version)\""
-  },
-  "engines": {
-    "node": ">=18.18"
+    "dev": "nodemon server.js"
   },
   "dependencies": {
-    "@sendgrid/mail": "^8.1.0",
+    "@supabase/supabase-js": "^2.48.0",
+    "@sendgrid/mail": "^7.7.0",
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "nanoid": "^5.0.7",
-    "stripe": "^16.6.0"
+    "stripe": "^16.5.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
-  },
-  "keywords": [
-    "stripe",
-    "checkout",
-    "webhook",
-    "sendgrid",
-    "qrcode",
-    "we-fly-teotihuacan"
-  ],
-  "license": "MIT",
-  "author": "We Fly Teotihuacan"
+  }
 }
