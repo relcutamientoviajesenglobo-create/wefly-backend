@@ -296,7 +296,7 @@ app.post('/create-checkout-session', async (req, res) => {
       client_reference_id: bookingId,
       success_url: `${FRONTEND_URL}/?checkout=success&bid={CHECKOUT_SESSION_ID}`,
       cancel_url: `${FRONTEND_URL}/?checkout=cancel`,
-      payment_method_types: ['card', 'oxxo', 'paypal'],
+      payment_method_types: ['card', 'oxxo'],
       payment_method_options: {
         oxxo: { expires_after_days: 2 },
       },
