@@ -338,8 +338,11 @@ app.post('/create-checkout-session', async (req, res) => {
         date: booking?.date ? String(booking.date) : '',
       },
       client_reference_id: bookingId,
-      success_url: `${FRONTEND_URL}/?checkout=success&bid={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${FRONTEND_URL}/?checkout=cancel`,
+
+      // 🔴 AQUÍ VA EL CAMBIO IMPORTANTE PARA LA PANTALLA DE CONFIRMACIÓN 🔴
+      success_url: `${FRONTEND_URL}/?success=true&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${FRONTEND_URL}/?canceled=true`,
+      // (Tu HTML nuevo soporta también el esquema anterior ?checkout=success&bid=..., pero con esto ya estándar Stripe)
     });
 
     res.json({ url: session.url, bookingId });
